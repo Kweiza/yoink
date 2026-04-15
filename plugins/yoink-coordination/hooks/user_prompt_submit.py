@@ -40,22 +40,29 @@ def _project_dir() -> Optional[Path]:
     return Path(env) if env else None
 
 
-def _task_set_for_current_session(ctx, cfg, hook_session_id: Optional[str]) -> bool:
-    """Return True iff our session entry in the yoink:status issue has a
-    non-empty task_summary. Defaults to True on any gh / lookup failure so
-    we never spam the reminder during an outage.
+_STATE_SET = "set"          # entry exists with non-empty task_summary
+_STATE_EMPTY = "empty"      # entry exists but task_summary is empty/None
+_STATE_NO_ENTRY = "none"    # no matching entry yet (session not declared anything)
+_STATE_ERROR = "error"      # gh / parsing failure
 
-    v0.3.13: mirror pre_tool_use._find_my_session matching rules — when
-    we know our own session_id we never inherit an entry that has a
-    different claude_session_id (those belong to past sessions).
+
+def _evaluate_task_state(ctx, cfg, hook_session_id: Optional[str]) -> str:
+    """Classify the current session's task_summary state. Caller decides
+    what to do for each value.
+
+    v0.3.14: split from the prior boolean to fix a self-defeating bug —
+    previously the "no matching entry yet" case returned True (skip
+    reminder), and the caller then stamped the cache, freezing the
+    reminder for the rest of the session even after PreToolUse later
+    created an entry with an empty task_summary.
     """
     label_status = _label(cfg.label_prefix, constants.LABEL_SUFFIX_STATUS)
     try:
         issues = github.list_my_status_issues(ctx.login, label_status)
     except Exception:
-        return True
+        return _STATE_ERROR
     if not issues:
-        return True
+        return _STATE_NO_ENTRY
     issues.sort(key=lambda i: i["number"])
     body = issues[0].get("body", "") or ""
     parsed, _ = state_mod.parse_body(body)
@@ -80,8 +87,10 @@ def _task_set_for_current_session(ctx, cfg, hook_session_id: Optional[str]) -> b
                 matched_session = s
                 break
     if matched_session is None:
-        return True  # no matching session yet — session not declared anything
-    return bool((matched_session.task_summary or "").strip())
+        return _STATE_NO_ENTRY
+    if (matched_session.task_summary or "").strip():
+        return _STATE_SET
+    return _STATE_EMPTY
 
 
 _REMINDER = (
@@ -120,15 +129,17 @@ def run(stdin_text: Optional[str] = None) -> int:
             return 0
         cfg, _ = cfg_mod.load_config(project_dir)
         try:
-            if _task_set_for_current_session(ctx, cfg, hook_session_id):
-                # Live check said task is set — persist to cache so next
-                # prompts go through the fast path.
+            state = _evaluate_task_state(ctx, cfg, hook_session_id)
+            if state == _STATE_SET:
                 task_cache.mark_set(ctx.worktree_path, ctx.branch)
                 return 0
-            # stdout from UserPromptSubmit is prepended to Claude's
-            # user-turn context. This makes the reminder persistent
-            # until the task is recorded.
-            print(_REMINDER)
+            if state == _STATE_EMPTY:
+                print(_REMINDER)
+                return 0
+            # _STATE_NO_ENTRY / _STATE_ERROR — silent, do NOT mark cache.
+            # The session may declare a file later this turn; we want the
+            # next prompt's UserPromptSubmit to re-check rather than be
+            # frozen into the fast path.
         except Exception as e:
             print(f"[yoink] UserPromptSubmit reminder failed: {e}",
                   file=sys.stderr)

@@ -38,7 +38,6 @@ import policy               # noqa: E402
 import claim                # noqa: E402
 import warning              # noqa: E402
 import telemetry            # noqa: E402
-import task_cache           # noqa: E402
 
 TARGET_TOOLS = {"Edit", "Write"}
 BLOCK_EXIT_CODE = 2  # Per spec §5.2; verified in E2E T16.
@@ -322,32 +321,14 @@ def run(stdin_text: Optional[str] = None) -> int:
                     # Only attach yoink:active when this hook actually created
                     # the issue — avoids a redundant label call on every edit.
                     github.add_label(num, label_active)
-                # v0.3.11: at acquire time, if task_summary not yet set,
-                # print a direct reminder to stderr. Unlike the
-                # UserPromptSubmit reminder this fires at the exact moment a
-                # file gets declared, so the attention signal is tied to the
-                # triggering action.
-                # v0.3.13: when a NEW path is declared but task_summary IS
-                # already set, emit a softer scope-shift nudge so Claude
-                # can decide if the existing summary is still accurate.
-                if changed:
-                    cur_summary = (me.task_summary or "").strip()
-                    if not cur_summary and not task_cache.is_set(ctx.worktree_path, ctx.branch):
-                        print(
-                            "[yoink] declared \"" + norm + "\" for this session. "
-                            "Record your goal now with "
-                            "`/yoink-coordination:task \"<summary>\"` — teammates "
-                            "rely on it to understand parallel work.",
-                            file=sys.stderr,
-                        )
-                    elif cur_summary:
-                        print(
-                            "[yoink] declared new path \"" + norm + "\". "
-                            "Current task: \"" + cur_summary + "\". "
-                            "If your scope has shifted, update with "
-                            "`/yoink-coordination:task \"<new summary>\"`.",
-                            file=sys.stderr,
-                        )
+                # v0.3.14: PreToolUse stderr at exit 0 is debug-log only —
+                # neither Claude nor the user sees it (verified against
+                # Claude Code hooks docs). Removed earlier nudges; rely on
+                # UserPromptSubmit stdout (the only Claude-visible
+                # exit-0 channel for advisory text). Scope-shift detection
+                # via PreToolUse would require JSON output or exit-2
+                # blocking — deferred to a future patch with explicit
+                # design.
                 if conflicting_owners:
                     msg = warning.format_conflict(
                         path=norm, owners=conflicting_owners,

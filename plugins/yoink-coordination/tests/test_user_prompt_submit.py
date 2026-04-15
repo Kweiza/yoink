@@ -225,10 +225,101 @@ def test_upsubmit_does_not_inherit_other_session_task(tmp_path, monkeypatch):
         lambda l, lab: [{"number": 1, "body": body,
                           "assignees": [{"login": "alice"}]}],
     )
-    # ctx.claude_session_id="ccs-NEW" but issue contains only ccs-OLD entry —
-    # we expect "no match" → return True (skip reminder; new session has
-    # not declared anything yet).
-    assert hook._task_set_for_current_session(ctx, cfg, "ccs-NEW") is True
-    # Sanity: same call but with old session_id matches and reads
-    # task_summary as set.
-    assert hook._task_set_for_current_session(ctx, cfg, "ccs-OLD") is True
+    # v0.3.14: ctx.claude_session_id="ccs-NEW" but issue only has ccs-OLD —
+    # _STATE_NO_ENTRY (silent reminder + caller must NOT mark cache).
+    assert hook._evaluate_task_state(ctx, cfg, "ccs-NEW") == hook._STATE_NO_ENTRY
+    # Sanity: same call but with old session_id matches and reads its
+    # set task_summary.
+    assert hook._evaluate_task_state(ctx, cfg, "ccs-OLD") == hook._STATE_SET
+
+
+def test_upsubmit_no_entry_does_not_mark_cache(tmp_path, monkeypatch):
+    """v0.3.14 critical fix: when there is no matching session entry yet
+    (new session, hasn't declared a file), the hook must NOT stamp the
+    cache. Otherwise the next prompt would fast-path silent forever even
+    though a PreToolUse later this turn could create an entry with an
+    empty task_summary that needs nagging."""
+    import importlib, sys as _sys
+    from pathlib import Path as _Path
+    hooks = _Path(__file__).resolve().parents[1] / "hooks"
+    if str(hooks) not in _sys.path:
+        _sys.path.insert(0, str(hooks))
+    monkeypatch.setenv("YOINK_TASK_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    import task_cache as tc
+    importlib.reload(tc)
+    import user_prompt_submit as hook
+    importlib.reload(hook)
+
+    from types import SimpleNamespace
+    fake_ctx = SimpleNamespace(
+        login="alice", repo_name_with_owner="o/r",
+        worktree_path="/wt", branch="main",
+        session_id="s", claude_session_id="ccs-fresh",
+        task_issue=None, started_at="2026-04-15T10:00:00Z",
+    )
+    monkeypatch.setattr(hook.ctx_mod, "build_context", lambda: fake_ctx)
+    monkeypatch.setattr(hook.github, "gh_auth_ok", lambda: True)
+    monkeypatch.setattr(hook.github, "list_my_status_issues", lambda l, lab: [])
+    monkeypatch.setattr(
+        hook.cfg_mod, "load_config",
+        lambda d: (SimpleNamespace(label_prefix="yoink"), []),
+    )
+    rc = hook.run(stdin_text='{"session_id":"ccs-fresh"}')
+    assert rc == 0
+    # The critical assertion: no stamp written when no entry exists.
+    assert hook.task_cache.is_set("/wt", "main") is False
+
+
+def test_upsubmit_empty_summary_prints_reminder_and_no_cache(tmp_path, monkeypatch, capsys):
+    """When entry exists with empty task_summary, print reminder AND do
+    not mark cache (cache is only for confirmed-set state)."""
+    import importlib, sys as _sys
+    from pathlib import Path as _Path
+    hooks = _Path(__file__).resolve().parents[1] / "hooks"
+    if str(hooks) not in _sys.path:
+        _sys.path.insert(0, str(hooks))
+    monkeypatch.setenv("YOINK_TASK_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    import task_cache as tc
+    importlib.reload(tc)
+    import user_prompt_submit as hook
+    importlib.reload(hook)
+    import state as state_mod
+
+    me = state_mod.Session(
+        session_id="s", worktree_path="/wt", branch="main",
+        task_issue=None,
+        started_at="2026-04-15T10:00:00Z",
+        last_heartbeat="2026-04-15T10:00:00Z",
+        declared_files=[{"path": "x.py", "declared_at": "2026-04-15T10:00:00Z"}],
+        driven_by="claude-code",
+        claude_session_id="ccs-me",
+        task_summary=None,
+    )
+    body = state_mod.render_body(
+        state_mod.State(updated_at="2026-04-15T10:00:00Z", sessions=[me]),
+        login="alice", preserve_tail_from="",
+    )
+    from types import SimpleNamespace
+    monkeypatch.setattr(hook.ctx_mod, "build_context",
+                        lambda: SimpleNamespace(
+                            login="alice", repo_name_with_owner="o/r",
+                            worktree_path="/wt", branch="main",
+                            session_id="s", claude_session_id="ccs-me",
+                            task_issue=None,
+                            started_at="2026-04-15T10:00:00Z"))
+    monkeypatch.setattr(hook.github, "gh_auth_ok", lambda: True)
+    monkeypatch.setattr(
+        hook.github, "list_my_status_issues",
+        lambda l, lab: [{"number": 1, "body": body, "assignees": [{"login": "alice"}]}],
+    )
+    monkeypatch.setattr(
+        hook.cfg_mod, "load_config",
+        lambda d: (SimpleNamespace(label_prefix="yoink"), []),
+    )
+    rc = hook.run(stdin_text='{"session_id":"ccs-me"}')
+    assert rc == 0
+    out = capsys.readouterr()
+    assert "SYSTEM INSTRUCTION" in out.out  # reminder printed
+    assert hook.task_cache.is_set("/wt", "main") is False  # NOT cached
