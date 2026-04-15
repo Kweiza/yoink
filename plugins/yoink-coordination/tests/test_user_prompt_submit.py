@@ -183,3 +183,52 @@ def test_upsubmit_stronger_reminder_language():
     assert "MUST" in r
     assert "BEFORE" in r
     assert "/yoink-coordination:task" in r
+
+
+def test_upsubmit_does_not_inherit_other_session_task(tmp_path, monkeypatch):
+    """v0.3.13: when our session_id differs from the only entry in the
+    issue, treat it as 'no matching session' (silent), not as inherited
+    'task is set'. Crucially the new session's PreToolUse will create a
+    fresh entry — at which point this hook will start prompting again."""
+    import importlib, sys as _sys
+    from pathlib import Path as _Path
+    hooks = _Path(__file__).resolve().parents[1] / "hooks"
+    if str(hooks) not in _sys.path:
+        _sys.path.insert(0, str(hooks))
+    monkeypatch.setenv("YOINK_TASK_CACHE_ROOT", str(tmp_path / "cache"))
+    import task_cache as tc
+    importlib.reload(tc)
+    import user_prompt_submit as hook
+    importlib.reload(hook)
+    import state as state_mod
+
+    other = state_mod.Session(
+        session_id="old", worktree_path="/wt", branch="main",
+        task_issue=None,
+        started_at="2026-04-15T10:00:00Z",
+        last_heartbeat="2026-04-15T10:00:00Z",
+        declared_files=[],
+        driven_by="claude-code",
+        claude_session_id="ccs-OLD",
+        task_summary="old session summary",
+    )
+    body = state_mod.render_body(
+        state_mod.State(updated_at="2026-04-15T10:00:00Z", sessions=[other]),
+        login="alice", preserve_tail_from="",
+    )
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(worktree_path="/wt", branch="main",
+                          claude_session_id="ccs-NEW", login="alice")
+    cfg = SimpleNamespace(label_prefix="yoink")
+    monkeypatch.setattr(
+        hook.github, "list_my_status_issues",
+        lambda l, lab: [{"number": 1, "body": body,
+                          "assignees": [{"login": "alice"}]}],
+    )
+    # ctx.claude_session_id="ccs-NEW" but issue contains only ccs-OLD entry —
+    # we expect "no match" → return True (skip reminder; new session has
+    # not declared anything yet).
+    assert hook._task_set_for_current_session(ctx, cfg, "ccs-NEW") is True
+    # Sanity: same call but with old session_id matches and reads
+    # task_summary as set.
+    assert hook._task_set_for_current_session(ctx, cfg, "ccs-OLD") is True

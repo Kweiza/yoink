@@ -43,7 +43,12 @@ def _project_dir() -> Optional[Path]:
 def _task_set_for_current_session(ctx, cfg, hook_session_id: Optional[str]) -> bool:
     """Return True iff our session entry in the yoink:status issue has a
     non-empty task_summary. Defaults to True on any gh / lookup failure so
-    we never spam the reminder during an outage."""
+    we never spam the reminder during an outage.
+
+    v0.3.13: mirror pre_tool_use._find_my_session matching rules — when
+    we know our own session_id we never inherit an entry that has a
+    different claude_session_id (those belong to past sessions).
+    """
     label_status = _label(cfg.label_prefix, constants.LABEL_SUFFIX_STATUS)
     try:
         issues = github.list_my_status_issues(ctx.login, label_status)
@@ -55,16 +60,28 @@ def _task_set_for_current_session(ctx, cfg, hook_session_id: Optional[str]) -> b
     body = issues[0].get("body", "") or ""
     parsed, _ = state_mod.parse_body(body)
     sid = hook_session_id or ctx.claude_session_id
-    for s in parsed.sessions:
-        matched = False
-        if sid and s.claude_session_id == sid:
-            matched = True
-        elif (s.worktree_path == ctx.worktree_path
-              and s.branch == ctx.branch):
-            matched = True
-        if matched:
-            return bool((s.task_summary or "").strip())
-    return True  # no matching session yet — session_start hasn't run; skip
+    matched_session = None
+    if sid:
+        for s in parsed.sessions:
+            if s.claude_session_id == sid:
+                matched_session = s
+                break
+        if matched_session is None:
+            for s in parsed.sessions:
+                if (not s.claude_session_id
+                        and s.worktree_path == ctx.worktree_path
+                        and s.branch == ctx.branch):
+                    matched_session = s
+                    break
+    else:
+        for s in parsed.sessions:
+            if (s.worktree_path == ctx.worktree_path
+                    and s.branch == ctx.branch):
+                matched_session = s
+                break
+    if matched_session is None:
+        return True  # no matching session yet — session not declared anything
+    return bool((matched_session.task_summary or "").strip())
 
 
 _REMINDER = (

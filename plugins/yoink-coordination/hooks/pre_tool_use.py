@@ -161,14 +161,26 @@ def _find_my_session(parsed_state, hook_session_id, ctx):
 
     Task 0 A: PreToolUse stdin carries `session_id`; CLAUDE_ENV_FILE is absent.
     Prefer this payload session_id over ctx.claude_session_id (which will be
-    None in PreToolUse per Task 0 A). Fall back to (worktree_path, branch)
-    per Phase 2 journal 13 pattern.
+    None in PreToolUse per Task 0 A).
+
+    v0.3.13 fix: when we know our own session_id, only fall back to
+    (worktree, branch) for entries that lack their own claude_session_id
+    (legacy / pre-v0.3.10). Entries with a *different* claude_session_id
+    belong to past sessions on the same worktree+branch — we must NOT
+    inherit them, otherwise new sessions silently reuse old task state.
     """
     sid = hook_session_id or ctx.claude_session_id
     if sid:
         for s in parsed_state.sessions:
             if s.claude_session_id == sid:
                 return s
+        for s in parsed_state.sessions:
+            if (not s.claude_session_id
+                    and s.worktree_path == ctx.worktree_path
+                    and s.branch == ctx.branch):
+                return s
+        return None
+    # No session_id at all — pure (worktree, branch) fallback (legacy).
     for s in parsed_state.sessions:
         if s.worktree_path == ctx.worktree_path and s.branch == ctx.branch:
             return s
@@ -315,15 +327,27 @@ def run(stdin_text: Optional[str] = None) -> int:
                 # UserPromptSubmit reminder this fires at the exact moment a
                 # file gets declared, so the attention signal is tied to the
                 # triggering action.
-                if changed and not (me.task_summary or "").strip() \
-                        and not task_cache.is_set(ctx.worktree_path, ctx.branch):
-                    print(
-                        "[yoink] declared \"" + norm + "\" for this session. "
-                        "Record your goal now with "
-                        "`/yoink-coordination:task \"<summary>\"` — teammates "
-                        "rely on it to understand parallel work.",
-                        file=sys.stderr,
-                    )
+                # v0.3.13: when a NEW path is declared but task_summary IS
+                # already set, emit a softer scope-shift nudge so Claude
+                # can decide if the existing summary is still accurate.
+                if changed:
+                    cur_summary = (me.task_summary or "").strip()
+                    if not cur_summary and not task_cache.is_set(ctx.worktree_path, ctx.branch):
+                        print(
+                            "[yoink] declared \"" + norm + "\" for this session. "
+                            "Record your goal now with "
+                            "`/yoink-coordination:task \"<summary>\"` — teammates "
+                            "rely on it to understand parallel work.",
+                            file=sys.stderr,
+                        )
+                    elif cur_summary:
+                        print(
+                            "[yoink] declared new path \"" + norm + "\". "
+                            "Current task: \"" + cur_summary + "\". "
+                            "If your scope has shifted, update with "
+                            "`/yoink-coordination:task \"<new summary>\"`.",
+                            file=sys.stderr,
+                        )
                 if conflicting_owners:
                     msg = warning.format_conflict(
                         path=norm, owners=conflicting_owners,

@@ -379,3 +379,49 @@ def test_pretooluse_lazy_create_fails_returns_zero(tmp_path, capsys):
     assert rc == 0
     assert writes == []
     assert labels == []
+
+
+# ---------------------------------------------------------------
+# v0.3.13 — _find_my_session must NOT inherit entries that have a
+# different claude_session_id when our own sid is known.
+# ---------------------------------------------------------------
+def test_find_my_session_does_not_inherit_other_session_id():
+    import state as state_mod
+    other = state_mod.Session(
+        session_id="old", worktree_path="/wt", branch="main",
+        task_issue=None,
+        started_at="2026-04-15T10:00:00Z",
+        last_heartbeat="2026-04-15T10:00:00Z",
+        declared_files=[{"path": "a.py", "declared_at": "2026-04-15T10:00:00Z"}],
+        driven_by="claude-code",
+        claude_session_id="ccs-OLD",
+        task_summary="old summary",
+    )
+    parsed = state_mod.State(updated_at="", sessions=[other])
+
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(worktree_path="/wt", branch="main",
+                          claude_session_id="ccs-NEW")
+    out = hook._find_my_session(parsed, hook_session_id="ccs-NEW", ctx=ctx)
+    assert out is None, "must not return entry with mismatching claude_session_id"
+
+
+def test_find_my_session_falls_back_to_legacy_entry_without_id():
+    """Entries lacking claude_session_id (pre-v0.3.10 legacy) should still
+    be reachable via (worktree, branch) fallback."""
+    import state as state_mod
+    legacy = state_mod.Session(
+        session_id="legacy", worktree_path="/wt", branch="main",
+        task_issue=None,
+        started_at="2026-04-15T10:00:00Z",
+        last_heartbeat="2026-04-15T10:00:00Z",
+        declared_files=[],
+        driven_by="claude-code",
+        claude_session_id=None,
+    )
+    parsed = state_mod.State(updated_at="", sessions=[legacy])
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(worktree_path="/wt", branch="main",
+                          claude_session_id="ccs-NEW")
+    out = hook._find_my_session(parsed, hook_session_id="ccs-NEW", ctx=ctx)
+    assert out is legacy
