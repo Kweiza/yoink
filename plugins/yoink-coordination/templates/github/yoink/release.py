@@ -34,6 +34,11 @@ LABEL_STATUS = "yoink:status"
 LABEL_ACTIVE = "yoink:active"
 
 
+# In-process cache: path -> True/False keyed by (path, since_iso).
+# Each process iteration is short-lived, but sessions often share paths.
+_PRIMARY_HIT_CACHE = {}
+
+
 def _configure_gh_host():
     """Point `gh` CLI at the same GitHub server the Action runs on and
     forward the Action token in the form `gh` expects per host.
@@ -115,22 +120,60 @@ def _login_for(issue) -> str:
     return assignees[0].get("login") or ""
 
 
-def _release_in_session(session: state_mod.Session, changed: set) -> bool:
-    """Drop declared_files entries whose path is in `changed`. Returns True
-    if anything was released."""
+def _committed_on_primary_since(primary: str, path: str, since_iso: str) -> bool:
+    """Return True iff `origin/<primary>` has any commit touching `path`
+    with commit-date >= since_iso. Used to sweep declared entries whose
+    merge to the default branch happened in this push OR in a previous
+    push that a prior (failed) Action didn't clean up.
+
+    Cached per (path, since_iso) because multiple sessions may declare
+    the same path and we only need one git log call per combination.
+    """
+    key = (path, since_iso)
+    if key in _PRIMARY_HIT_CACHE:
+        return _PRIMARY_HIT_CACHE[key]
+    try:
+        out = _run([
+            "git", "log",
+            f"origin/{primary}",
+            f"--since={since_iso}",
+            "--format=%H",
+            "-1",
+            "--",
+            path,
+        ])
+        result = bool(out.strip())
+    except subprocess.CalledProcessError:
+        # Fail closed — don't release on git errors.
+        result = False
+    _PRIMARY_HIT_CACHE[key] = result
+    return result
+
+
+def _release_in_session(session: state_mod.Session, primary: str) -> bool:
+    """Drop declared_files entries whose path has any commit on
+    `origin/<primary>` dated on/after the entry's declared_at.
+    Returns True iff anything was released.
+    """
     if not session.declared_files:
         return False
-    kept = [
-        e for e in session.declared_files
-        if isinstance(e, dict) and e.get("path") not in changed
-    ]
+    kept = []
+    for e in session.declared_files:
+        if not isinstance(e, dict):
+            kept.append(e)
+            continue
+        path = e.get("path")
+        declared_at = e.get("declared_at") or session.last_heartbeat or session.started_at
+        if path and declared_at and _committed_on_primary_since(primary, path, declared_at):
+            continue  # release
+        kept.append(e)
     if len(kept) == len(session.declared_files):
         return False
     session.declared_files = kept
     return True
 
 
-def _process_issue(repo: str, issue: dict, changed: set) -> str:
+def _process_issue(repo: str, issue: dict, primary: str) -> str:
     """Returns one of: 'no-change', 'edited', 'closed'."""
     body = issue.get("body") or ""
     parsed, corrupt = state_mod.parse_body(body)
@@ -140,7 +183,7 @@ def _process_issue(repo: str, issue: dict, changed: set) -> str:
     any_change = False
     surviving = []
     for s in parsed.sessions:
-        released = _release_in_session(s, changed)
+        released = _release_in_session(s, primary)
         any_change = any_change or released
         if s.declared_files:
             surviving.append(s)
@@ -168,20 +211,18 @@ def _process_issue(repo: str, issue: dict, changed: set) -> str:
 
 def main() -> int:
     repo = os.environ.get("REPO", "")
-    before = os.environ.get("BEFORE", "")
     after = os.environ.get("AFTER", "")
+    primary = os.environ.get("PRIMARY", "").strip() or "main"
     if not repo or not after:
         print("[yoink-action] missing REPO / AFTER env", file=sys.stderr)
         return 2
-    try:
-        changed = _changed_paths(before, after)
-    except subprocess.CalledProcessError as e:
-        print(f"[yoink-action] git diff failed: {e.stderr}", file=sys.stderr)
-        return 2
-    if not changed:
-        print("[yoink-action] no changed paths in push; nothing to release.")
-        return 0
-    print(f"[yoink-action] push touched {len(changed)} path(s).")
+
+    # v0.3.24: sweep every open yoink:status issue and release every
+    # declared path that `origin/<primary>` already contains with a
+    # commit newer than the entry's declared_at. This catches stale
+    # entries left over from pushes where the Action failed or was
+    # disabled — not only the paths in THIS push's diff.
+    print(f"[yoink-action] sweeping against origin/{primary}.")
 
     try:
         issues = _list_status_issues(repo)
@@ -192,7 +233,7 @@ def main() -> int:
     edited = closed = 0
     for issue in issues:
         try:
-            result = _process_issue(repo, issue, changed)
+            result = _process_issue(repo, issue, primary)
         except subprocess.CalledProcessError as e:
             print(f"[yoink-action] issue #{issue.get('number')} failed: {e.stderr}",
                   file=sys.stderr)
