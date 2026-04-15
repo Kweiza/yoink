@@ -1,3 +1,16 @@
+# yoink-release workflow — schema v1
+#
+# Customize `runs-on`, `permissions`, and the trigger filter freely
+# (enterprise self-hosted runner, custom labels, extra events, etc.).
+# `/yoink-coordination:bootstrap` will NOT overwrite this file on updates.
+# The actual release logic lives in `.github/yoink/release.py` and is
+# refreshed automatically by bootstrap.
+#
+# If the plugin ever needs changes to this file (e.g. a new required env
+# var), the template's schema version will bump. Bootstrap will then
+# print a diff and halt — that is the only time you need to touch this
+# file manually.
+
 name: yoink release on merge to default branch
 
 on:
@@ -23,17 +36,5 @@ jobs:
           AFTER: ${{ github.sha }}
           REPO: ${{ github.repository }}
           PRIMARY: ${{ github.event.repository.default_branch }}
-          # GH_HOST is also auto-detected inside release.py from
-          # GITHUB_SERVER_URL, but pin it here so `gh` is configured
-          # even if release.py exits early.
-          GH_HOST: ${{ github.server_url == 'https://github.com' && 'github.com' || '' }}
-        run: |
-          set -e
-          # Strip scheme from GITHUB_SERVER_URL for gh CLI
-          HOST="${GITHUB_SERVER_URL#https://}"
-          HOST="${HOST#http://}"
-          HOST="${HOST%/}"
-          if [ "$HOST" != "github.com" ] && [ -n "$HOST" ]; then
-            export GH_HOST="$HOST"
-          fi
-          python3 .github/yoink/release.py
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+        run: python3 .github/yoink/release.py

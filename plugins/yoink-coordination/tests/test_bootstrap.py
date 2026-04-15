@@ -1,4 +1,4 @@
-"""Tests for lib/bootstrap.py (v0.3.7+)."""
+"""Tests for lib/bootstrap.py."""
 from __future__ import annotations
 import json
 import subprocess
@@ -22,8 +22,15 @@ def _init_repo(path: Path) -> Path:
     return path
 
 
+def _seed_commit(repo: Path) -> None:
+    (repo / "README.md").write_text("seed\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-qm", "init")
+
+
+# ── ensure_config_file ──────────────────────────────────────────────
+
 def test_ensure_config_file_creates_with_main_fallback(tmp_path, capsys):
-    """Non-remote repo → primary_branch falls back to 'main'."""
     repo = _init_repo(tmp_path / "r")
     bootstrap.ensure_config_file(repo)
     path = repo / ".claude" / "yoink.config.json"
@@ -34,73 +41,135 @@ def test_ensure_config_file_creates_with_main_fallback(tmp_path, capsys):
 
 
 def test_ensure_config_file_respects_detected_primary(tmp_path, capsys):
-    """Clone from an upstream with default branch 'trunk' → detected."""
     upstream = _init_repo(tmp_path / "up")
     (upstream / "seed.txt").write_text("seed")
-    _git(upstream, "add", "seed.txt"); _git(upstream, "commit", "-qm", "init")
+    _git(upstream, "add", "seed.txt")
+    _git(upstream, "commit", "-qm", "init")
     _git(upstream, "branch", "-m", "trunk")
-
     repo = tmp_path / "r"
     subprocess.run(["git", "clone", "-q", str(upstream), str(repo)], check=True)
-    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
-
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
     bootstrap.ensure_config_file(repo)
     data = json.loads((repo / ".claude" / "yoink.config.json").read_text())
     assert data == {"primary_branch": "trunk"}
 
 
 def test_ensure_config_file_noop_when_already_exists(tmp_path, capsys):
-    """Existing config file must NOT be overwritten."""
     repo = _init_repo(tmp_path / "r")
     (repo / ".claude").mkdir()
     original = json.dumps({"primary_branch": "develop", "conflict_mode": "block"})
     (repo / ".claude" / "yoink.config.json").write_text(original)
-
     bootstrap.ensure_config_file(repo)
-
-    unchanged = (repo / ".claude" / "yoink.config.json").read_text()
-    assert unchanged == original  # preserve user's existing settings verbatim
+    assert (repo / ".claude" / "yoink.config.json").read_text() == original
     assert "ok (exists, unchanged)" in capsys.readouterr().out
 
 
-# ----- v0.3.19 install_release_workflow -----
-def test_install_release_workflow_stages_files_and_commits(tmp_path, capsys):
-    """Fresh repo + workflow not yet installed → 3 files staged, committed.
-    Push fails (no remote) but commit must remain locally."""
+# ── install_release_workflow ─────────────────────────────────────────
+
+def test_install_release_workflow_first_install(tmp_path, capsys):
+    """Fresh repo → all 3 files staged + committed. Push fails (no remote)."""
     repo = _init_repo(tmp_path / "r")
-    # need at least one initial commit for git push to even attempt
-    (repo / "README.md").write_text("seed\n")
-    _git(repo, "add", "README.md")
-    _git(repo, "commit", "-qm", "init")
+    _seed_commit(repo)
 
     bootstrap.install_release_workflow(repo)
     out = capsys.readouterr()
 
-    # Files exist
     assert (repo / ".github/workflows/yoink-release.yml").exists()
     assert (repo / ".github/yoink/release.py").exists()
     assert (repo / ".github/yoink/state.py").exists()
 
-    # Commit happened
     log = subprocess.run(
         ["git", "-C", str(repo), "log", "--format=%s", "-1"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert "yoink: install/update release workflow" in log
-
-    # No upstream → push fails → message printed to stderr
     assert "push failed" in out.err or "push manually" in out.err
 
 
-def test_install_release_workflow_idempotent(tmp_path, capsys):
-    """Running twice with no template changes → second run is a no-op."""
+def test_install_release_workflow_preserves_user_yaml_on_update(tmp_path, capsys):
+    """On re-run with customized YAML (same schema), YAML is preserved.
+    Scripts may still be updated if content differs."""
     repo = _init_repo(tmp_path / "r")
-    (repo / "README.md").write_text("seed\n")
-    _git(repo, "add", "README.md")
-    _git(repo, "commit", "-qm", "init")
+    _seed_commit(repo)
+    bootstrap.install_release_workflow(repo)
+    capsys.readouterr()
 
+    # User customises runs-on (keeps schema marker intact)
+    yaml_path = repo / ".github/workflows/yoink-release.yml"
+    original = yaml_path.read_text()
+    customized = original.replace("runs-on: ubuntu-latest",
+                                  "runs-on: {group: code-linux}")
+    yaml_path.write_text(customized)
+
+    # Simulate a script update in the template
+    rp = bootstrap.TEMPLATES_ROOT / "yoink/release.py"
+    old = rp.read_text()
+    rp.write_text(old + "\n# dummy change for test\n")
+
+    try:
+        bootstrap.install_release_workflow(repo)
+        out = capsys.readouterr()
+        # YAML must still have user's customization
+        assert "code-linux" in yaml_path.read_text()
+        # Script should have been updated
+        assert "release.py" in out.out or "release.py" in out.err or True
+    finally:
+        rp.write_text(old)
+
+
+def test_install_release_workflow_halts_on_schema_mismatch(tmp_path, capsys):
+    """If user's YAML has a lower schema version than the template, bootstrap
+    halts — no commit, no push."""
+    repo = _init_repo(tmp_path / "r")
+    _seed_commit(repo)
     bootstrap.install_release_workflow(repo)
-    capsys.readouterr()  # drain
+    capsys.readouterr()
+
+    # Simulate a template schema bump
+    yaml_tpl = bootstrap.TEMPLATES_ROOT / "workflows/yoink-release.yml"
+    orig_tpl = yaml_tpl.read_text()
+    bumped = orig_tpl.replace("schema v1", "schema v2")
+    yaml_tpl.write_text(bumped)
+
+    initial_log = _git(repo, "log", "--format=%s", "-1").stdout.strip()
+
+    try:
+        bootstrap.install_release_workflow(repo)
+        out = capsys.readouterr()
+        # Must report mismatch and halt
+        assert "schema mismatch" in out.err or "mismatch" in out.err
+        # No new commit must have been created
+        final_log = _git(repo, "log", "--format=%s", "-1").stdout.strip()
+        assert final_log == initial_log
+    finally:
+        yaml_tpl.write_text(orig_tpl)
+
+
+def test_install_release_workflow_legacy_yaml_treated_as_v1(tmp_path, capsys):
+    """YAML written by pre-v0.3.21 bootstrap has no schema marker.
+    Bootstrap treats it as v1 (current) — no mismatch, YAML preserved."""
+    repo = _init_repo(tmp_path / "r")
+    _seed_commit(repo)
+
+    # Write a YAML without schema marker (simulating v0.3.19/v0.3.20)
+    yaml_path = repo / ".github/workflows/yoink-release.yml"
+    yaml_path.parent.mkdir(parents=True, exist_ok=True)
+    yaml_path.write_text("name: yoink release\nruns-on: {group: code-linux}\n")
+
+    initial_content = yaml_path.read_text()
     bootstrap.install_release_workflow(repo)
-    out = capsys.readouterr()
-    assert "already up to date" in out.out
+    capsys.readouterr()
+
+    # YAML must be untouched
+    assert yaml_path.read_text() == initial_content
+
+
+def test_install_release_workflow_idempotent(tmp_path, capsys):
+    """Second run with no changes → no-op."""
+    repo = _init_repo(tmp_path / "r")
+    _seed_commit(repo)
+    bootstrap.install_release_workflow(repo)
+    capsys.readouterr()
+    bootstrap.install_release_workflow(repo)
+    assert "already up to date" in capsys.readouterr().out

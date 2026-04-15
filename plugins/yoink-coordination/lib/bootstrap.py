@@ -1,19 +1,23 @@
-"""Bootstrap helpers for /yoink-coordination:bootstrap (v0.3.7+).
+"""Bootstrap helpers for /yoink-coordination:bootstrap.
 
-v0.3.19 adds `install_release_workflow` which copies the GitHub Actions
-release workflow templates into the user's repo, then commits and pushes
-them so the Action can fire on subsequent merges to the default branch.
+v0.3.21 split: the GitHub Actions release workflow YAML is treated as
+user-owned (customizable `runs-on`, `permissions`, etc.) and bootstrap
+only writes it on first install. The Python scripts under `.github/yoink/`
+are plugin-owned and always updated on content diff.
 
-`ensure_config_file` is preserved as a no-op-on-existing helper for the
-old primary_branch config. v0.3.20 will delete it once Actions release is
-verified.
+If the template workflow YAML carries a newer schema version than the
+user's file, bootstrap halts completely — no stage, no commit, no push —
+and prints the diff for the user to merge manually. This prevents a
+partial-update state where release.py v2 ships alongside workflow v1.
 """
 from __future__ import annotations
+import difflib
 import json
-import shutil
+import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 import constants
 import gitops
@@ -22,12 +26,11 @@ import gitops
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_ROOT = PLUGIN_ROOT / "templates" / "github"
 
-# (template path relative to TEMPLATES_ROOT, target path relative to cwd)
-_WORKFLOW_FILES = [
-    ("workflows/yoink-release.yml", ".github/workflows/yoink-release.yml"),
-    ("yoink/release.py", ".github/yoink/release.py"),
-    ("yoink/state.py", ".github/yoink/state.py"),
-]
+WORKFLOW_REL = ".github/workflows/yoink-release.yml"
+RELEASE_SCRIPT_REL = ".github/yoink/release.py"
+STATE_SCRIPT_REL = ".github/yoink/state.py"
+
+_SCHEMA_RE = re.compile(r"#\s*yoink-release workflow\s*[—-]\s*schema v(\d+)")
 
 
 def ensure_config_file(cwd: Path) -> None:
@@ -55,40 +58,121 @@ def _git(cwd: Path, *args, check=True):
     )
 
 
-def _stage_workflow_files(cwd: Path) -> list:
-    """Copy templates into cwd. Returns list of dst paths that were created
-    or updated. Files with identical content are skipped."""
-    changed = []
-    for src_rel, dst_rel in _WORKFLOW_FILES:
-        src = TEMPLATES_ROOT / src_rel
-        dst = cwd / dst_rel
-        if not src.exists():
-            print(f"[yoink] template missing: {src}", file=sys.stderr)
-            continue
-        new_content = src.read_text(encoding="utf-8")
-        if dst.exists() and dst.read_text(encoding="utf-8") == new_content:
-            continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text(new_content, encoding="utf-8")
-        changed.append(dst_rel)
-    return changed
+def _parse_schema(path: Path) -> Optional[int]:
+    """Return the `schema v<N>` integer from the file header, or None."""
+    if not path.exists():
+        return None
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace")[:1024]
+    except OSError:
+        return None
+    m = _SCHEMA_RE.search(head)
+    return int(m.group(1)) if m else None
+
+
+def _print_schema_mismatch(dst: Path, tpl: Path,
+                           user_schema: int, tpl_schema: int) -> None:
+    print(
+        f"[yoink] workflow schema mismatch: your {dst.name} is v{user_schema}, "
+        f"template is v{tpl_schema}. Halting — NO files staged, committed, or pushed.",
+        file=sys.stderr,
+    )
+    try:
+        user_text = dst.read_text(encoding="utf-8").splitlines(keepends=True)
+        tpl_text = tpl.read_text(encoding="utf-8").splitlines(keepends=True)
+        diff = difflib.unified_diff(
+            user_text, tpl_text,
+            fromfile=f"yours (v{user_schema})",
+            tofile=f"template (v{tpl_schema})",
+        )
+        sys.stderr.write("".join(diff))
+    except OSError:
+        pass
+    print(
+        "[yoink] Merge the template into your workflow (preserving your "
+        "runs-on / permissions / etc.), then re-run "
+        "`/yoink-coordination:bootstrap`.",
+        file=sys.stderr,
+    )
+
+
+def _stage_yaml_if_fresh(cwd: Path) -> Optional[str]:
+    """Copy the workflow template only on first install. Returns the
+    staged relpath or None if skipped."""
+    dst = cwd / WORKFLOW_REL
+    if dst.exists():
+        return None
+    src = TEMPLATES_ROOT / "workflows/yoink-release.yml"
+    content = src.read_text(encoding="utf-8")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(content, encoding="utf-8")
+    return WORKFLOW_REL
+
+
+def _stage_script_if_changed(cwd: Path, src_rel: str, dst_rel: str) -> Optional[str]:
+    """Copy script template if content differs. Always overwrites on diff."""
+    src = TEMPLATES_ROOT / src_rel
+    dst = cwd / dst_rel
+    if not src.exists():
+        print(f"[yoink] template missing: {src}", file=sys.stderr)
+        return None
+    new_content = src.read_text(encoding="utf-8")
+    if dst.exists() and dst.read_text(encoding="utf-8") == new_content:
+        return None
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(new_content, encoding="utf-8")
+    return dst_rel
 
 
 def install_release_workflow(cwd: Path) -> None:
-    """Copy + commit + push the release workflow files. Idempotent.
+    """Install / update the release workflow and scripts.
 
-    Behavior:
-      - If files already up to date → no commit, just inform.
-      - Otherwise stage the three files, commit them with a fixed message,
-        and push to the current branch's upstream. If push fails (no
-        upstream / auth) → commit stays locally; user can push manually.
+    Behaviour:
+      - If the workflow YAML doesn't exist → copy it from the template.
+      - If it exists and schema matches the template → leave it alone
+        (preserves user's `runs-on`, `permissions`, etc.).
+      - If it exists and schema differs → HALT (no stage, no commit, no
+        push). Print diff and ask user to merge manually.
+      - The `.github/yoink/release.py` and `.github/yoink/state.py`
+        scripts are plugin-owned — overwritten on content diff.
+      - When any file was staged, git add + commit + push. Push failure
+        leaves the commit local with stderr guidance.
     """
     if not (cwd / ".git").exists():
         print(f"[yoink] {cwd}: not a git repo, skipping workflow install.",
               file=sys.stderr)
         return
 
-    changed = _stage_workflow_files(cwd)
+    yaml_dst = cwd / WORKFLOW_REL
+    yaml_tpl = TEMPLATES_ROOT / "workflows/yoink-release.yml"
+    tpl_schema = _parse_schema(yaml_tpl)
+    if tpl_schema is None:
+        print("[yoink] template workflow has no schema marker; aborting install.",
+              file=sys.stderr)
+        return
+
+    user_schema = _parse_schema(yaml_dst) if yaml_dst.exists() else None
+    # Legacy grace: pre-v0.3.21 bootstrap wrote YAML without a marker.
+    # Treat missing-but-existing as v1 so we don't flag it as a mismatch.
+    if yaml_dst.exists() and user_schema is None:
+        user_schema = 1
+
+    if user_schema is not None and user_schema != tpl_schema:
+        _print_schema_mismatch(yaml_dst, yaml_tpl, user_schema, tpl_schema)
+        return  # halt everything
+
+    changed = []
+    staged_yaml = _stage_yaml_if_fresh(cwd)
+    if staged_yaml:
+        changed.append(staged_yaml)
+    for src_rel, dst_rel in [
+        ("yoink/release.py", RELEASE_SCRIPT_REL),
+        ("yoink/state.py", STATE_SCRIPT_REL),
+    ]:
+        staged = _stage_script_if_changed(cwd, src_rel, dst_rel)
+        if staged:
+            changed.append(staged)
+
     if not changed:
         print("[yoink] release workflow already up to date.")
         return
@@ -101,7 +185,6 @@ def install_release_workflow(cwd: Path) -> None:
     try:
         _git(cwd, "commit", "-m", "yoink: install/update release workflow")
     except subprocess.CalledProcessError as e:
-        # e.g., pre-commit hook rejected
         print(f"[yoink] git commit failed: {e.stderr.strip()}", file=sys.stderr)
         return
 
