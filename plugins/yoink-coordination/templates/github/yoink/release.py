@@ -35,26 +35,38 @@ LABEL_ACTIVE = "yoink:active"
 
 
 def _configure_gh_host():
-    """Point `gh` CLI at the same GitHub server the Action runs on.
+    """Point `gh` CLI at the same GitHub server the Action runs on and
+    forward the Action token in the form `gh` expects per host.
 
-    On GitHub Enterprise Server, GITHUB_SERVER_URL is set to the enterprise
-    hostname (e.g. https://github.ecodesamsung.com). `gh` without
-    GH_HOST defaults to github.com → 401 Bad credentials with the
-    enterprise GITHUB_TOKEN. Strip the scheme and export GH_HOST so all
-    subsequent `gh` calls target the right server.
+    Two tweaks for GitHub Enterprise Server (e.g. GITHUB_SERVER_URL =
+    https://github.ecodesamsung.com):
+      1. Strip the scheme from GITHUB_SERVER_URL and export GH_HOST so
+         `gh` talks to the enterprise server instead of github.com.
+      2. `gh` reads enterprise tokens from GH_ENTERPRISE_TOKEN (not
+         GH_TOKEN — that one is github.com-only). Workflows typically
+         pass the GITHUB_TOKEN through GH_TOKEN, so mirror it into
+         GH_ENTERPRISE_TOKEN when we're targeting a non-default host.
     """
-    if os.environ.get("GH_HOST"):
-        return
-    server = os.environ.get("GITHUB_SERVER_URL", "").strip()
-    if not server:
-        return
-    host = server
-    for prefix in ("https://", "http://"):
-        if host.startswith(prefix):
-            host = host[len(prefix):]
-    host = host.rstrip("/")
+    host = os.environ.get("GH_HOST", "").strip()
+    if not host:
+        server = os.environ.get("GITHUB_SERVER_URL", "").strip()
+        if server:
+            h = server
+            for prefix in ("https://", "http://"):
+                if h.startswith(prefix):
+                    h = h[len(prefix):]
+            h = h.rstrip("/")
+            if h and h != "github.com":
+                os.environ["GH_HOST"] = h
+                host = h
+
     if host and host != "github.com":
-        os.environ["GH_HOST"] = host
+        token = (os.environ.get("GH_ENTERPRISE_TOKEN")
+                 or os.environ.get("GITHUB_ENTERPRISE_TOKEN")
+                 or os.environ.get("GH_TOKEN")
+                 or os.environ.get("GITHUB_TOKEN"))
+        if token:
+            os.environ["GH_ENTERPRISE_TOKEN"] = token
 
 
 _configure_gh_host()
