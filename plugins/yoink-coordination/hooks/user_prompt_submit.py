@@ -82,14 +82,15 @@ def _evaluate_task_state(ctx, cfg, hook_session_id: Optional[str]) -> str:
 
 
 _REMINDER = (
-    "[yoink] SYSTEM INSTRUCTION — this session has declared files but no "
-    "task_summary recorded.\n"
-    "BEFORE replying to the user's request below, you MUST invoke the "
-    "slash command as your first action:\n"
-    "    /yoink-coordination:task \"<1~2 sentence summary of your goal>\"\n"
-    "Teammates see this summary in the yoink:status issue and rely on it "
-    "to understand what you're doing in parallel. Skipping this step "
-    "breaks coordination."
+    "[yoink] SYSTEM INSTRUCTION — task_summary not recorded for this "
+    "(worktree, branch).\n"
+    "BEFORE editing any file, plan your scope and invoke as your first "
+    "action:\n"
+    "    /yoink-coordination:task \"<1~2 sentence goal>\" "
+    "--files <path1> <path2> ...\n"
+    "List EVERY file you intend to modify (relative paths). Teammates "
+    "see this in the yoink:status issue and conflicts are detected "
+    "before your first edit. Skipping this step breaks coordination."
 )
 
 

@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
-"""yoink-set-task: record a 1~2 sentence summary of what this session is doing.
+"""yoink-set-task: record task summary AND the files I plan to modify.
 
 Usage:
-    yoink-set-task "<summary text>"
+    yoink-set-task "<summary>" [--files <path1> <path2> ...]
 
-Writes `task_summary` on the current session entry in my yoink:status issue
-body. Summary is visible to teammates in the issue body's human-readable
-table alongside the branch-derived issue reference.
+Examples:
+    yoink-set-task "compress temp.md and remove obsolete drafts" \
+        --files temp.md temp1.md temp2.md temp3.md
 
-Resolves "current session" in the same order as hooks:
-    1. CLAUDE_PROJECT_DIR env (must match a session's worktree_path)
-    2. Fallback to (worktree_path, branch) tuple
-No session_id env is available to CLI, so an ambiguous issue (multiple
-sessions in the same worktree/branch) updates the most recent.
+The summary is the first arguments joined with spaces, up to (but not
+including) the optional `--files` flag. Everything after `--files` is a
+list of repo-relative file paths to declare immediately.
+
+Why this matters (v0.3.17): teammates see the planned scope upfront in
+the yoink:status issue body. Conflicts are detected before the first
+edit, and the lazy entry created by `/yoink-coordination:task` is no
+longer empty until PreToolUse fills it in retroactively.
+
+PreToolUse remains a safety net for files that weren't pre-declared.
+Acquire is idempotent — files declared here will not be re-added by the
+hook.
 """
 from __future__ import annotations
 import os
@@ -23,7 +30,7 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
-import constants, github, context as ctx_mod, config as cfg_mod, state as state_mod, lock, task_cache  # noqa: E402
+import constants, github, context as ctx_mod, config as cfg_mod, state as state_mod, lock, task_cache, claim, gitops, policy, warning  # noqa: E402
 
 
 def _label(prefix: str, suffix: str) -> str:
@@ -35,10 +42,67 @@ def _lock_path(login: str, repo: str) -> Path:
     return constants.CACHE_DIR / f"{slug}.lock"
 
 
-def main(argv: list[str]) -> int:
-    summary = " ".join(argv).strip()
+def _parse_argv(argv):
+    summary_parts = []
+    files = []
+    in_files = False
+    for arg in argv:
+        if not in_files and arg == "--files":
+            in_files = True
+            continue
+        if in_files:
+            files.append(arg)
+        else:
+            summary_parts.append(arg)
+    return " ".join(summary_parts).strip(), files
+
+
+def _normalize_path(project_dir: Path, raw: str):
+    if not raw:
+        return None
+    p = Path(raw)
+    if not p.is_absolute():
+        p = (project_dir / p).resolve()
+    try:
+        rel = p.relative_to(project_dir.resolve())
+    except ValueError:
+        return None
+    posix = rel.as_posix()
+    if posix.startswith("./"):
+        posix = posix[2:]
+    return posix
+
+
+def _build_others_index(login, label_status):
+    """Mirror pre_tool_use._fetch_others (path → owners)."""
+    others = github.list_other_status_issues_open(login, label_status)
+    index = {}
+    for iss in others:
+        assignees = iss.get("assignees") or []
+        if not assignees:
+            continue
+        peer_login = assignees[0]["login"]
+        parsed, corrupt = state_mod.parse_body(iss.get("body", ""))
+        if corrupt:
+            continue
+        for s in parsed.sessions:
+            for entry in (getattr(s, "declared_files", []) or []):
+                p = (entry or {}).get("path")
+                if not isinstance(p, str):
+                    continue
+                index.setdefault(p, []).append({
+                    "login": peer_login,
+                    "branch": s.branch,
+                    "declared_at": (entry or {}).get("declared_at", ""),
+                    "task_issue": s.task_issue,
+                })
+    return index
+
+
+def main(argv):
+    summary, raw_files = _parse_argv(argv)
     if not summary:
-        print("usage: yoink-set-task \"<1~2 sentence summary>\"", file=sys.stderr)
+        print("usage: yoink-set-task \"<summary>\" [--files <path>...]", file=sys.stderr)
         return 2
 
     if not github.gh_auth_ok():
@@ -51,13 +115,28 @@ def main(argv: list[str]) -> int:
     cfg, _ = cfg_mod.load_config(Path(ctx.worktree_path))
     label_status = _label(cfg.label_prefix, constants.LABEL_SUFFIX_STATUS)
 
+    project_dir = Path(ctx.worktree_path)
+
+    # Normalize + de-dup file list. Drop gitignored entries silently.
+    normalized = []
+    for raw in raw_files:
+        norm = _normalize_path(project_dir, raw)
+        if not norm:
+            print(f"[yoink] could not normalize file path {raw!r}; skipping.",
+                  file=sys.stderr)
+            continue
+        try:
+            if gitops.is_path_gitignored(project_dir, norm):
+                continue
+        except Exception:
+            pass
+        if norm not in normalized:
+            normalized.append(norm)
+
     try:
         with lock.acquire(_lock_path(ctx.login, ctx.repo_name_with_owner),
                           timeout=cfg.lock_timeout_seconds):
             issues = github.list_my_status_issues(ctx.login, label_status)
-            # v0.3.16: task can be recorded BEFORE any file declare so the
-            # reminder loop ("record task → then edit") works on the very
-            # first prompt. Lazy-create issue+entry as needed.
             if not issues:
                 num = github.create_status_issue(ctx.login, label_status)
                 if num is None:
@@ -77,7 +156,7 @@ def main(argv: list[str]) -> int:
                 existing = issue.get("body", "")
                 parsed, _ = state_mod.parse_body(existing)
 
-            # Match by (worktree, branch) per v0.3.15 single-rule model.
+            # (worktree, branch) entry — lazy-create.
             target = None
             for s in parsed.sessions:
                 if (s.worktree_path == ctx.worktree_path
@@ -99,15 +178,52 @@ def main(argv: list[str]) -> int:
                 parsed.sessions.append(target)
             target.task_summary = summary
 
-            parsed.updated_at = ctx_mod.now_utc_iso()
+            # Conflict pre-check across the whole requested file list.
+            others_index = _build_others_index(ctx.login, label_status)
+            blocked_warnings = []
+            advisory_warnings = []
+            for path in normalized:
+                owners = others_index.get(path) or []
+                if not owners:
+                    continue
+                decision = policy.decide(cfg.conflict_mode, owners)
+                msg = warning.format_conflict(
+                    path=path, owners=owners, mode=cfg.conflict_mode,
+                    now_iso=ctx_mod.now_utc_iso(),
+                )
+                (blocked_warnings if decision.should_block
+                 else advisory_warnings).append(msg)
+
+            if blocked_warnings:
+                # Block mode + at least one peer-owned path → refuse the
+                # whole declare. Task summary is also NOT updated to keep
+                # state consistent (atomic intent).
+                for msg in blocked_warnings:
+                    print(msg, file=sys.stderr)
+                print("[yoink] task NOT recorded — resolve conflicts above.",
+                      file=sys.stderr)
+                return 1
+
+            # Apply acquires (advisory mode or no conflicts).
+            now = ctx_mod.now_utc_iso()
+            new_declared = list(target.declared_files or [])
+            for path in normalized:
+                new_declared, _ = claim.acquire(new_declared, path, now=now)
+            target.declared_files = new_declared
+            target.last_heartbeat = now
+
+            parsed.updated_at = now
             new_body = state_mod.render_body(
                 parsed, login=ctx.login, preserve_tail_from=existing,
             )
             if github.edit_issue_body(num, new_body):
-                # v0.3.11: stamp local cache so UserPromptSubmit hook can
-                # skip the gh round-trip on subsequent prompts.
                 task_cache.mark_set(ctx.worktree_path, ctx.branch)
-                print(f"[yoink] task recorded: {summary}")
+                files_note = (
+                    f" ({len(normalized)} file(s) declared)" if normalized else ""
+                )
+                print(f"[yoink] task recorded: {summary}{files_note}")
+                for msg in advisory_warnings:
+                    print(msg, file=sys.stderr)
                 return 0
             print("[yoink] failed to update issue body.", file=sys.stderr)
             return 1

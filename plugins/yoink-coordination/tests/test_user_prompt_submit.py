@@ -180,9 +180,11 @@ def test_upsubmit_stronger_reminder_language():
     import user_prompt_submit as hook
     importlib.reload(hook)
     r = hook._REMINDER
-    assert "MUST" in r
+    assert "SYSTEM INSTRUCTION" in r
     assert "BEFORE" in r
     assert "/yoink-coordination:task" in r
+    # v0.3.17: reminder must explicitly tell Claude to enumerate files.
+    assert "--files" in r
 
 
 def test_upsubmit_does_not_inherit_other_session_task(tmp_path, monkeypatch):
