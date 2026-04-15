@@ -1,31 +1,29 @@
 #!/usr/bin/env python3
-"""yoink-coordination SessionStart hook. See spec §4.1.
+"""yoink-coordination SessionStart hook.
 
-v0.3.10 lazy-session change: SessionStart no longer creates a yoink:status
-issue or registers a session entry. A session entry is only declared when
-the session actually modifies a file (handled in PreToolUse). SessionStart
-still performs self-heal on my existing entries (if the issue already
-exists) and prints peer activity for context.
+v0.3.15: under the "task lives until primary-merge" rule, SessionStart
+no longer touches my issue body. Heartbeat-based stale eviction would
+remove entries with unmerged declared_files — that contradicts the
+single rule, so it's gone. Stamp clearing also removed (the stamp
+follows task_summary lifetime, not session lifetime).
+
+This hook only:
+  - emits latency metric
+  - prints peer activity for orientation
 """
 from __future__ import annotations
-import os
-import re
 import sys
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
-import constants, github, context as ctx_mod, config as cfg_mod, state as state_mod, lock, render, claim  # noqa: E402
+import constants, github, context as ctx_mod, config as cfg_mod, state as state_mod, render  # noqa: E402
 import telemetry  # noqa: E402
-import task_cache  # noqa: E402
+
 
 def _label(prefix: str, suffix: str) -> str:
     return f"{prefix}:{suffix}"
-
-def _lock_path(login: str, repo: str) -> Path:
-    slug = re.sub(r"[^A-Za-z0-9]+", "__", f"{login}-{repo}")
-    return constants.CACHE_DIR / f"{slug}.lock"
 
 
 def _print_other_members(ctx, cfg):
@@ -50,6 +48,7 @@ def _print_other_members(ctx, cfg):
         now_iso=ctx_mod.now_utc_iso(),
     ))
 
+
 def main() -> int:
     with telemetry.LatencyTimer("session_start"):
         if not github.gh_auth_ok():
@@ -63,58 +62,15 @@ def main() -> int:
         for w in warnings:
             print(f"[yoink] {w}", file=sys.stderr)
 
-        # v0.3.12: clear any stale task stamp from a previous session on
-        # this (worktree, branch). Without this, a stamp written during
-        # session A would suppress the reminder for the entirely separate
-        # session B that follows /clear, /compact, or a fresh launch.
-        task_cache.clear(ctx.worktree_path, ctx.branch)
-
         label_status = _label(cfg.label_prefix, constants.LABEL_SUFFIX_STATUS)
-
         if not github.label_exists(label_status):
             print(f"[yoink] label '{label_status}' not present in this repo; skipping. "
                   f"Run `/yoink-coordination:bootstrap` to opt in.", file=sys.stderr)
             return 0
 
-        # v0.3.10: Do not create an issue here. Only self-heal if one exists.
-        try:
-            lockfile = _lock_path(ctx.login, ctx.repo_name_with_owner)
-            with lock.acquire(lockfile, timeout=cfg.lock_timeout_seconds):
-                issues = github.list_my_status_issues(ctx.login, label_status)
-                if issues:
-                    issues.sort(key=lambda i: i["number"])
-                    primary = issues[0]
-                    num = primary["number"]
-                    extras = [i["number"] for i in issues[1:]]
-                    if extras:
-                        print(f"[yoink] multiple status issues found; using #{num}. "
-                              f"Duplicates: {', '.join(f'#{n}' for n in extras)}. "
-                              f"Please close or merge them manually.", file=sys.stderr)
-                    existing_body = primary.get("body", "")
-                    parsed, corrupt = state_mod.parse_body(existing_body)
-                    if corrupt:
-                        print(f"[yoink] body of issue #{num} was unparseable; leaving untouched.", file=sys.stderr)
-                    else:
-                        stale = claim.find_stale_sessions(
-                            parsed.sessions,
-                            now_iso=ctx_mod.now_utc_iso(),
-                            threshold_seconds=cfg.stale_threshold_seconds,
-                        )
-                        if stale:
-                            parsed.sessions = claim.remove_sessions(parsed.sessions, stale)
-                            parsed.updated_at = ctx_mod.now_utc_iso()
-                            print(f"[yoink] self-heal: removed {len(stale)} stale session(s)", file=sys.stderr)
-                            telemetry.emit("session_start", "self_heal", stale_removed=len(stale))
-                            new_body = state_mod.render_body(parsed, login=ctx.login, preserve_tail_from=existing_body)
-                            if state_mod.body_exceeds_limit(new_body):
-                                print("[yoink] warning: issue body exceeds 65536-char limit.", file=sys.stderr)
-                            github.edit_issue_body(num, new_body)
-        except lock.LockTimeout:
-            print("[yoink] lock timeout; skipping self-heal for this session start.", file=sys.stderr)
-            return 0
-
         _print_other_members(ctx, cfg)
         return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

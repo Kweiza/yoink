@@ -156,30 +156,12 @@ def _write_body(issue_num: int, login: str, state, existing_body: str) -> bool:
 
 
 def _find_my_session(parsed_state, hook_session_id, ctx):
-    """Find the session entry in parsed_state that matches the current session.
-
-    Task 0 A: PreToolUse stdin carries `session_id`; CLAUDE_ENV_FILE is absent.
-    Prefer this payload session_id over ctx.claude_session_id (which will be
-    None in PreToolUse per Task 0 A).
-
-    v0.3.13 fix: when we know our own session_id, only fall back to
-    (worktree, branch) for entries that lack their own claude_session_id
-    (legacy / pre-v0.3.10). Entries with a *different* claude_session_id
-    belong to past sessions on the same worktree+branch — we must NOT
-    inherit them, otherwise new sessions silently reuse old task state.
+    """v0.3.15: a task entry is per (worktree, branch) and persists until
+    all its declared_files are merged to the primary branch. Sessions are
+    visitors — claude_session_id is recorded for "last writer" visibility
+    but is NOT a match key. New sessions on the same (worktree, branch)
+    inherit the existing entry (and its declared_files + task_summary).
     """
-    sid = hook_session_id or ctx.claude_session_id
-    if sid:
-        for s in parsed_state.sessions:
-            if s.claude_session_id == sid:
-                return s
-        for s in parsed_state.sessions:
-            if (not s.claude_session_id
-                    and s.worktree_path == ctx.worktree_path
-                    and s.branch == ctx.branch):
-                return s
-        return None
-    # No session_id at all — pure (worktree, branch) fallback (legacy).
     for s in parsed_state.sessions:
         if s.worktree_path == ctx.worktree_path and s.branch == ctx.branch:
             return s
@@ -249,10 +231,12 @@ def run(stdin_text: Optional[str] = None) -> int:
                     telemetry.emit("pre_tool_use", "issue_create")
                 me = _find_my_session(parsed, hook_session_id, ctx)
                 reconciled = False
+                cur_ccs = hook_session_id or ctx.claude_session_id
                 if me is None:
-                    # Phase 4 §4.2 (a): self-reconcile — SessionStart self-heal or a
-                    # crash race may have removed my entry. Re-insert so coordination
-                    # resumes immediately.
+                    # First file declare for this (worktree, branch). Lazy-create
+                    # the entry. v0.3.15: this is the only entry for this
+                    # location; future sessions inherit it until all paths
+                    # land on primary (stop.py releases them).
                     me = state_mod.Session(
                         session_id=ctx.session_id,
                         worktree_path=ctx.worktree_path,
@@ -262,16 +246,20 @@ def run(stdin_text: Optional[str] = None) -> int:
                         last_heartbeat=ctx.started_at,
                         declared_files=[],
                         driven_by=constants.DRIVEN_BY_CLAUDE_CODE,
-                        claude_session_id=hook_session_id or ctx.claude_session_id,
+                        claude_session_id=cur_ccs,
                     )
                     parsed.sessions.append(me)
                     reconciled = True
-                    print("[yoink] self-reconcile: re-inserted my session entry", file=sys.stderr)
-                    telemetry.emit("pre_tool_use", "refetch", reason="self_missing")
+                elif cur_ccs and me.claude_session_id != cur_ccs:
+                    # New session inherited the entry — record current
+                    # session as last writer for visibility.
+                    me.claude_session_id = cur_ccs
 
-                # 7. Self-cleanup calculation
-                dirty = gitops.working_tree_paths(project_dir)
-                new_declared, removed = claim.self_cleanup(me.declared_files or [], dirty)
+                # v0.3.15: self_cleanup removed. Releases happen ONLY in
+                # stop.py via merge-to-primary detection. A path stays
+                # declared until it's actually on the primary branch.
+                new_declared = list(me.declared_files or [])
+                removed = []
 
                 # 8. Fetch others
                 others_index = _fetch_others(ctx.login, label_status)

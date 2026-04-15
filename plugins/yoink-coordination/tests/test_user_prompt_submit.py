@@ -225,11 +225,10 @@ def test_upsubmit_does_not_inherit_other_session_task(tmp_path, monkeypatch):
         lambda l, lab: [{"number": 1, "body": body,
                           "assignees": [{"login": "alice"}]}],
     )
-    # v0.3.14: ctx.claude_session_id="ccs-NEW" but issue only has ccs-OLD —
-    # _STATE_NO_ENTRY (silent reminder + caller must NOT mark cache).
-    assert hook._evaluate_task_state(ctx, cfg, "ccs-NEW") == hook._STATE_NO_ENTRY
-    # Sanity: same call but with old session_id matches and reads its
-    # set task_summary.
+    # v0.3.15: matching is by (worktree, branch) so a new session reads
+    # the persistent task_summary from the inherited entry. Old session
+    # id and new session id both map to _STATE_SET.
+    assert hook._evaluate_task_state(ctx, cfg, "ccs-NEW") == hook._STATE_SET
     assert hook._evaluate_task_state(ctx, cfg, "ccs-OLD") == hook._STATE_SET
 
 

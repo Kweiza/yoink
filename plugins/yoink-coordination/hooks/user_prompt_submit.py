@@ -66,26 +66,14 @@ def _evaluate_task_state(ctx, cfg, hook_session_id: Optional[str]) -> str:
     issues.sort(key=lambda i: i["number"])
     body = issues[0].get("body", "") or ""
     parsed, _ = state_mod.parse_body(body)
-    sid = hook_session_id or ctx.claude_session_id
+    # v0.3.15: single entry per (worktree, branch), shared across sessions
+    # that work on the same task. claude_session_id is metadata only.
     matched_session = None
-    if sid:
-        for s in parsed.sessions:
-            if s.claude_session_id == sid:
-                matched_session = s
-                break
-        if matched_session is None:
-            for s in parsed.sessions:
-                if (not s.claude_session_id
-                        and s.worktree_path == ctx.worktree_path
-                        and s.branch == ctx.branch):
-                    matched_session = s
-                    break
-    else:
-        for s in parsed.sessions:
-            if (s.worktree_path == ctx.worktree_path
-                    and s.branch == ctx.branch):
-                matched_session = s
-                break
+    for s in parsed.sessions:
+        if (s.worktree_path == ctx.worktree_path
+                and s.branch == ctx.branch):
+            matched_session = s
+            break
     if matched_session is None:
         return _STATE_NO_ENTRY
     if (matched_session.task_summary or "").strip():

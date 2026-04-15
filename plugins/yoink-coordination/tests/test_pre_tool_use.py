@@ -55,7 +55,7 @@ def test_conflict_block_returns_nonzero(tmp_path):
          ]), \
          patch.object(hook, "_write_body", return_value=True), \
          patch("pre_tool_use.gitops.working_tree_paths", return_value=set()), \
-         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx()):
+         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx(str(tmp_path), "main")):
         rc = hook.run(stdin_text=payload)
     # Task 0 C not yet verified; spec assumes exit 2. E2E T16 will confirm.
     assert rc != 0
@@ -100,11 +100,12 @@ def _make_session():
     )
 
 
-def _make_ctx():
+def _make_ctx(worktree_path: str = "/tmp/wt", branch: str = "b"):
+    """v0.3.15: tests use (worktree_path, branch) for matching."""
     from types import SimpleNamespace
     return SimpleNamespace(
         login="kweiza", repo_name_with_owner="kweiza/yoink",
-        branch="b", worktree_path="/tmp/wt",
+        branch=branch, worktree_path=worktree_path,
         session_id="s", claude_session_id=None,
         task_issue=None, started_at="2026-04-14T10:00:00Z",
     )
@@ -138,7 +139,7 @@ def test_pretooluse_cooldown_expired_triggers_heartbeat_write(tmp_path):
          patch.object(hook, "_fetch_others", return_value=[]), \
          patch.object(hook, "_write_body", side_effect=lambda *a, **k: writes.append(a) or True), \
          patch("pre_tool_use.gitops.working_tree_paths", return_value={"already.py"}), \
-         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx()):
+         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx(str(tmp_path), "main")):
         rc = hook.run(stdin_text=payload)
     assert rc == 0
     # Already claimed (dedup) → no structural change → but cooldown is expired,
@@ -175,18 +176,20 @@ def test_pretooluse_cooldown_not_expired_skips_body_write(tmp_path):
          patch.object(hook, "_fetch_others", return_value=[]), \
          patch.object(hook, "_write_body", side_effect=lambda *a, **k: writes.append(a) or True), \
          patch("pre_tool_use.gitops.working_tree_paths", return_value={"already.py"}), \
-         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx()):
+         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx(str(tmp_path), "main")):
         rc = hook.run(stdin_text=payload)
     assert rc == 0
     # Neither structural change nor cooldown expired → no body edit.
     assert len(writes) == 0
 
 
-def test_pretooluse_self_reconcile_when_my_session_missing(tmp_path, capsys):
-    """If _find_my_session returns None, re-insert my entry and write body."""
+def test_pretooluse_lazy_creates_entry_when_no_session_for_wb(tmp_path, capsys):
+    """v0.3.15: if no entry exists for (worktree, branch), PreToolUse
+    creates a fresh entry on first declare and writes the body. The
+    'self-reconcile' stderr message was removed because under the new
+    rule this is the normal lazy-create path, not exceptional recovery."""
     import state as state_mod
 
-    # Body has no sessions (simulating SessionStart self-heal removed me).
     parsed = state_mod.State(updated_at="", sessions=[])
     existing_body = state_mod.render_body(parsed, login="kweiza")
 
@@ -202,13 +205,15 @@ def test_pretooluse_self_reconcile_when_my_session_missing(tmp_path, capsys):
          patch.object(hook, "_fetch_others", return_value=[]), \
          patch.object(hook, "_write_body", side_effect=lambda *a, **k: writes.append(a) or True), \
          patch("pre_tool_use.gitops.working_tree_paths", return_value=set()), \
-         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx()):
+         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx(str(tmp_path), "main")):
         rc = hook.run(stdin_text=payload)
     assert rc == 0
-    err = capsys.readouterr().err
-    assert "self-reconcile" in err.lower()
-    # Reconcile must force a body write.
+    # Entry created → write body.
     assert len(writes) == 1
+    # _write_body signature: (issue_num, login, parsed_state, existing)
+    parsed_after = writes[0][2]
+    assert len(parsed_after.sessions) == 1
+    assert parsed_after.sessions[0].declared_files
 
 
 # ------------------------------------------------------------------
@@ -238,9 +243,10 @@ def test_pre_tool_use_emits_latency_on_early_return(capsys):
     assert latency[0]["hook"] == "pre_tool_use"
 
 
-def test_pre_tool_use_emits_refetch_on_self_reconcile(tmp_path, capsys):
-    """When my session entry is missing from the fetched issue body, the
-    self-reconcile path re-inserts it and must emit refetch reason=self_missing."""
+def test_pre_tool_use_lazy_create_does_not_emit_refetch(tmp_path, capsys):
+    """v0.3.15: lazy entry creation is the normal path, not exceptional
+    self-reconcile, so the refetch metric is no longer emitted. The
+    acquire metric is still emitted for the new declared path."""
     import state as state_mod
     parsed = state_mod.State(updated_at="", sessions=[])
     existing = ""
@@ -254,13 +260,12 @@ def test_pre_tool_use_emits_refetch_on_self_reconcile(tmp_path, capsys):
          patch.object(hook, "_fetch_others", return_value=[]), \
          patch.object(hook, "_write_body", return_value=True), \
          patch("pre_tool_use.gitops.working_tree_paths", return_value=set()), \
-         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx()):
+         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx(str(tmp_path), "main")):
         rc = hook.run(stdin_text=payload)
     assert rc == 0
     lines = _metric_lines(capsys.readouterr().err)
-    refetch = [l for l in lines if l["metric"] == "refetch"]
-    assert len(refetch) == 1
-    assert refetch[0]["reason"] == "self_missing"
+    assert [l for l in lines if l["metric"] == "refetch"] == []
+    assert [l for l in lines if l["metric"] == "acquire"]
 
 
 def test_pre_tool_use_emits_conflict_with_path_hash_only(tmp_path, capsys):
@@ -287,7 +292,7 @@ def test_pre_tool_use_emits_conflict_with_path_hash_only(tmp_path, capsys):
          ]), \
          patch.object(hook, "_write_body", return_value=True), \
          patch("pre_tool_use.gitops.working_tree_paths", return_value=set()), \
-         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx()):
+         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx(str(tmp_path), "main")):
         rc = hook.run(stdin_text=payload)
     assert rc == 0
     err = capsys.readouterr().err
@@ -335,7 +340,7 @@ def test_pretooluse_lazy_creates_issue_on_first_declare(tmp_path):
          patch("pre_tool_use.github.add_label",
                side_effect=lambda n, lbl: labels.append((n, lbl))), \
          patch("pre_tool_use.gitops.working_tree_paths", return_value=set()), \
-         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx()):
+         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx(str(tmp_path), "main")):
         rc = hook.run(stdin_text=payload)
 
     assert rc == 0
@@ -373,7 +378,7 @@ def test_pretooluse_lazy_create_fails_returns_zero(tmp_path, capsys):
          patch("pre_tool_use.github.add_label",
                side_effect=lambda n, lbl: labels.append((n, lbl))), \
          patch("pre_tool_use.gitops.working_tree_paths", return_value=set()), \
-         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx()):
+         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx(str(tmp_path), "main")):
         rc = hook.run(stdin_text=payload)
 
     assert rc == 0
@@ -382,12 +387,16 @@ def test_pretooluse_lazy_create_fails_returns_zero(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------
-# v0.3.13 — _find_my_session must NOT inherit entries that have a
-# different claude_session_id when our own sid is known.
+# v0.3.15 — _find_my_session matches by (worktree, branch) only.
+# A session entry survives across Claude sessions until all its
+# declared_files land on primary (release happens in stop.py only).
 # ---------------------------------------------------------------
-def test_find_my_session_does_not_inherit_other_session_id():
+def test_find_my_session_inherits_entry_across_sessions_by_wb():
+    """A new Claude session with a different ccs MUST inherit an existing
+    entry on the same (worktree, branch) — that's how task_summary and
+    declared_files persist across session boundaries until merged."""
     import state as state_mod
-    other = state_mod.Session(
+    prior = state_mod.Session(
         session_id="old", worktree_path="/wt", branch="main",
         task_issue=None,
         started_at="2026-04-15T10:00:00Z",
@@ -395,33 +404,20 @@ def test_find_my_session_does_not_inherit_other_session_id():
         declared_files=[{"path": "a.py", "declared_at": "2026-04-15T10:00:00Z"}],
         driven_by="claude-code",
         claude_session_id="ccs-OLD",
-        task_summary="old summary",
+        task_summary="ongoing work",
     )
-    parsed = state_mod.State(updated_at="", sessions=[other])
-
+    parsed = state_mod.State(updated_at="", sessions=[prior])
     from types import SimpleNamespace
     ctx = SimpleNamespace(worktree_path="/wt", branch="main",
                           claude_session_id="ccs-NEW")
     out = hook._find_my_session(parsed, hook_session_id="ccs-NEW", ctx=ctx)
-    assert out is None, "must not return entry with mismatching claude_session_id"
+    assert out is prior
 
 
-def test_find_my_session_falls_back_to_legacy_entry_without_id():
-    """Entries lacking claude_session_id (pre-v0.3.10 legacy) should still
-    be reachable via (worktree, branch) fallback."""
+def test_find_my_session_returns_none_when_no_entry_for_wb():
     import state as state_mod
-    legacy = state_mod.Session(
-        session_id="legacy", worktree_path="/wt", branch="main",
-        task_issue=None,
-        started_at="2026-04-15T10:00:00Z",
-        last_heartbeat="2026-04-15T10:00:00Z",
-        declared_files=[],
-        driven_by="claude-code",
-        claude_session_id=None,
-    )
-    parsed = state_mod.State(updated_at="", sessions=[legacy])
+    parsed = state_mod.State(updated_at="", sessions=[])
     from types import SimpleNamespace
     ctx = SimpleNamespace(worktree_path="/wt", branch="main",
                           claude_session_id="ccs-NEW")
-    out = hook._find_my_session(parsed, hook_session_id="ccs-NEW", ctx=ctx)
-    assert out is legacy
+    assert hook._find_my_session(parsed, hook_session_id="ccs-NEW", ctx=ctx) is None

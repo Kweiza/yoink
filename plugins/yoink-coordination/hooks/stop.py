@@ -36,6 +36,7 @@ import state as state_mod   # noqa
 import lock                 # noqa
 import gitops               # noqa
 import telemetry            # noqa
+import task_cache           # noqa
 
 
 def _heartbeat_cooldown_expired(last_heartbeat: str, now_iso: str, cooldown_s: int) -> bool:
@@ -168,45 +169,59 @@ def run(stdin_text: Optional[str] = None) -> int:
                 existing = primary.get("body", "")
                 parsed, _ = state_mod.parse_body(existing)
                 changed = False
+                entry_emptied = False
                 now = ctx_mod.now_utc_iso()
-                sid = hook_session_id or ctx.claude_session_id
-                for s in parsed.sessions:
-                    matches = False
-                    if sid and s.claude_session_id == sid:
-                        matches = True
-                    elif (s.worktree_path == ctx.worktree_path
-                          and s.branch == ctx.branch):
-                        matches = True
-                    if not matches:
-                        continue
+                # v0.3.15: single entry per (worktree, branch) — no ccs match.
+                target_idx = None
+                for i, s in enumerate(parsed.sessions):
+                    if (s.worktree_path == ctx.worktree_path
+                            and s.branch == ctx.branch):
+                        target_idx = i
+                        break
+                if target_idx is not None:
+                    s = parsed.sessions[target_idx]
                     kept, released = _release_merged(
                         s.declared_files or [], project_dir, primary_branch, now,
                     )
                     if released:
                         s.declared_files = kept
                         changed = True
-                    break
-                # Phase 4 §4.4: also write on cooldown expiry even without
-                # structural change.
+                    if changed and not s.declared_files:
+                        # Task complete — every declared path landed on
+                        # primary (or was reverted). Drop the entry; the
+                        # task is over.
+                        parsed.sessions.pop(target_idx)
+                        entry_emptied = True
+
                 cooldown_expired = False
-                for s in parsed.sessions:
-                    if (
-                        (sid and s.claude_session_id == sid)
-                        or (s.worktree_path == ctx.worktree_path
-                            and s.branch == ctx.branch)
-                    ):
-                        cooldown_expired = _heartbeat_cooldown_expired(
-                            s.last_heartbeat, now, cfg.heartbeat_cooldown_seconds,
-                        )
-                        if changed or cooldown_expired:
-                            s.last_heartbeat = now
-                        break
+                if not entry_emptied and target_idx is not None:
+                    s = parsed.sessions[target_idx]
+                    cooldown_expired = _heartbeat_cooldown_expired(
+                        s.last_heartbeat, now, cfg.heartbeat_cooldown_seconds,
+                    )
+                    if changed or cooldown_expired:
+                        s.last_heartbeat = now
+
                 if changed or cooldown_expired:
                     parsed.updated_at = now
                     new_body = state_mod.render_body(
                         parsed, login=ctx.login, preserve_tail_from=existing,
                     )
                     github.edit_issue_body(num, new_body)
+                    if entry_emptied:
+                        # Stamp belongs to this (worktree, branch) entry —
+                        # entry gone, stamp must go too so the next task
+                        # at this location starts with a fresh reminder.
+                        task_cache.clear(ctx.worktree_path, ctx.branch)
+                        if not parsed.sessions:
+                            label_active = _label(
+                                cfg.label_prefix, constants.LABEL_SUFFIX_ACTIVE,
+                            )
+                            try:
+                                github.remove_label(num, label_active)
+                                github.close_issue(num)
+                            except Exception:
+                                pass
         except lock.LockTimeout:
             return 0
         except Exception as e:

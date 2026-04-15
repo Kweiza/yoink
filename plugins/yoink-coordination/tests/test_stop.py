@@ -157,7 +157,9 @@ def test_stop_releases_merged_path_and_emits_release_metric(monkeypatch, tmp_pat
 
     assert len(writes) == 1
     body = writes[0]
-    assert '"declared_files": []' in body
+    # v0.3.15: when declared_files becomes empty after release, the
+    # entire entry is dropped (task complete).
+    assert '"sessions": []' in body
     err = capsys.readouterr().err
     lines = [_json.loads(ln.split(" ", 1)[1]) for ln in err.splitlines()
              if ln.startswith("[yoink-metric] ")]
