@@ -34,9 +34,10 @@ LABEL_STATUS = "yoink:status"
 LABEL_ACTIVE = "yoink:active"
 
 
-# In-process cache: path -> True/False keyed by (path, since_iso).
-# Each process iteration is short-lived, but sessions often share paths.
+# In-process cache for the two heuristics below.
 _PRIMARY_HIT_CACHE = {}
+_BRANCH_READY_CACHE = {}
+_SYNCED_CACHE = {}
 
 
 def _configure_gh_host():
@@ -150,11 +151,76 @@ def _committed_on_primary_since(primary: str, path: str, since_iso: str) -> bool
     return result
 
 
-def _release_in_session(session: state_mod.Session, primary: str) -> bool:
-    """Drop declared_files entries whose path has any commit on
-    `origin/<primary>` dated on/after the entry's declared_at.
-    Returns True iff anything was released.
+def _ensure_remote_branch(branch: str) -> bool:
+    """Make sure `origin/<branch>` is resolvable locally. Fetches if
+    missing. Cached per branch. Returns True iff the ref is ready."""
+    if branch in _BRANCH_READY_CACHE:
+        return _BRANCH_READY_CACHE[branch]
+    ready = False
+    try:
+        _run(["git", "rev-parse", "--verify", f"origin/{branch}"])
+        ready = True
+    except subprocess.CalledProcessError:
+        try:
+            _run(["git", "fetch", "--quiet", "origin", branch])
+            _run(["git", "rev-parse", "--verify", f"origin/{branch}"])
+            ready = True
+        except subprocess.CalledProcessError:
+            ready = False
+    _BRANCH_READY_CACHE[branch] = ready
+    return ready
+
+
+def _path_synced_with_primary(primary: str, branch: str, path: str) -> bool:
+    """Content-level comparison between `origin/<branch>` and
+    `origin/<primary>` for a single path. True iff they are identical —
+    which covers (a) merged content, (b) consistently-deleted paths,
+    and (c) squash-merge net-zero cases where the primary never shows
+    a commit touching the path."""
+    key = (primary, branch, path)
+    if key in _SYNCED_CACHE:
+        return _SYNCED_CACHE[key]
+    synced = False
+    if _ensure_remote_branch(branch) and _ensure_remote_branch(primary):
+        try:
+            p = subprocess.run(
+                ["git", "diff", "--quiet",
+                 f"origin/{primary}", f"origin/{branch}", "--", path],
+                capture_output=True, text=True,
+            )
+            synced = (p.returncode == 0)
+        except subprocess.CalledProcessError:
+            synced = False
+    _SYNCED_CACHE[key] = synced
+    return synced
+
+
+def _should_release(primary: str, branch: str, path: str, declared_at: str) -> bool:
+    """Decide whether a single declared path can be released.
+
+    - Session working on primary directly → release when primary has any
+      commit touching this path since declared_at (post-push, origin is
+      at the tip).
+    - Session working on a feature branch → release when the branch tip
+      matches primary for this path (merged / net-zero / consistent-delete).
+    - Branch unresolvable (deleted after merge?) → fall back to commit
+      presence on primary since declared_at.
     """
+    if not path:
+        return False
+    if branch and branch != primary:
+        if _ensure_remote_branch(branch):
+            return _path_synced_with_primary(primary, branch, path)
+    # Either primary-branch session OR branch no longer fetchable.
+    if declared_at:
+        return _committed_on_primary_since(primary, path, declared_at)
+    return False
+
+
+def _release_in_session(session: state_mod.Session, primary: str) -> bool:
+    """Drop declared_files entries whose state on `origin/<session.branch>`
+    matches `origin/<primary>` (or, for primary-branch sessions, whose
+    path has been committed on primary since declared_at)."""
     if not session.declared_files:
         return False
     kept = []
@@ -163,9 +229,13 @@ def _release_in_session(session: state_mod.Session, primary: str) -> bool:
             kept.append(e)
             continue
         path = e.get("path")
-        declared_at = e.get("declared_at") or session.last_heartbeat or session.started_at
-        if path and declared_at and _committed_on_primary_since(primary, path, declared_at):
-            continue  # release
+        declared_at = (
+            e.get("declared_at")
+            or session.last_heartbeat
+            or session.started_at
+        )
+        if path and _should_release(primary, session.branch, path, declared_at):
+            continue
         kept.append(e)
     if len(kept) == len(session.declared_files):
         return False

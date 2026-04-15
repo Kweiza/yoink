@@ -17,15 +17,17 @@ def release_mod():
     import release as r  # noqa
     importlib.reload(r)
     r._PRIMARY_HIT_CACHE.clear()
+    r._BRANCH_READY_CACHE.clear()
+    r._SYNCED_CACHE.clear()
     return r
 
 
 def _session_dict(path="src/foo.py", declared_at="2026-04-15T10:00:00Z",
-                  claude_session_id="ccs"):
+                  claude_session_id="ccs", branch="feature"):
     return {
         "session_id": "s",
         "worktree_path": "/wt",
-        "branch": "feature",
+        "branch": branch,
         "task_issue": None,
         "started_at": "2026-04-15T10:00:00Z",
         "last_heartbeat": "2026-04-15T10:00:00Z",
@@ -51,28 +53,64 @@ def _parse_sessions(body, release_mod):
     return parsed.sessions
 
 
-def test_release_drops_path_committed_on_primary(release_mod):
+# ── _should_release dispatching ─────────────────────────────────
+
+def test_should_release_uses_content_diff_for_feature_branch(release_mod):
+    """Non-primary session → content diff path."""
+    with patch.object(release_mod, "_ensure_remote_branch", return_value=True), \
+         patch.object(release_mod, "_path_synced_with_primary",
+                      return_value=True) as synced_mock, \
+         patch.object(release_mod, "_committed_on_primary_since") as commit_mock:
+        assert release_mod._should_release("main", "feature", "a.py",
+                                           "2026-04-15T00:00:00Z") is True
+    synced_mock.assert_called_once()
+    commit_mock.assert_not_called()
+
+
+def test_should_release_falls_back_to_commit_check_when_primary_session(release_mod):
+    """Session on primary itself → commit check path."""
+    with patch.object(release_mod, "_path_synced_with_primary") as synced_mock, \
+         patch.object(release_mod, "_committed_on_primary_since",
+                      return_value=True) as commit_mock:
+        assert release_mod._should_release("main", "main", "a.py",
+                                           "2026-04-15T00:00:00Z") is True
+    synced_mock.assert_not_called()
+    commit_mock.assert_called_once()
+
+
+def test_should_release_falls_back_when_branch_missing(release_mod):
+    """Feature branch gone from origin (deleted after merge) → commit check."""
+    with patch.object(release_mod, "_ensure_remote_branch", return_value=False), \
+         patch.object(release_mod, "_committed_on_primary_since",
+                      return_value=True) as commit_mock:
+        assert release_mod._should_release("main", "deleted-branch", "a.py",
+                                           "2026-04-15T00:00:00Z") is True
+    commit_mock.assert_called_once()
+
+
+# ── _release_in_session integration with _should_release ────────
+
+def test_release_drops_path_synced_with_primary(release_mod):
     s_dict = _session_dict("src/foo.py")
     session = _parse_sessions(_body({"updated_at": "", "sessions": [s_dict]}),
                               release_mod)[0]
-    with patch.object(release_mod, "_committed_on_primary_since",
-                      return_value=True):
+    with patch.object(release_mod, "_should_release", return_value=True):
         assert release_mod._release_in_session(session, "main") is True
     assert session.declared_files == []
 
 
-def test_release_keeps_path_not_yet_on_primary(release_mod):
+def test_release_keeps_path_when_not_synced(release_mod):
     s_dict = _session_dict("src/foo.py")
     session = _parse_sessions(_body({"updated_at": "", "sessions": [s_dict]}),
                               release_mod)[0]
-    with patch.object(release_mod, "_committed_on_primary_since",
-                      return_value=False):
+    with patch.object(release_mod, "_should_release", return_value=False):
         assert release_mod._release_in_session(session, "main") is False
     assert len(session.declared_files) == 1
 
 
+# ── _committed_on_primary_since ─────────────────────────────────
+
 def test_committed_on_primary_since_positive(release_mod):
-    """When git log returns a commit, the helper returns True."""
     with patch.object(release_mod, "_run", return_value="abc123\n"):
         assert release_mod._committed_on_primary_since(
             "main", "src/foo.py", "2026-04-15T10:00:00Z"
@@ -86,12 +124,13 @@ def test_committed_on_primary_since_negative(release_mod):
         ) is False
 
 
+# ── _process_issue end-to-end ───────────────────────────────────
+
 def test_process_issue_no_change_when_nothing_landed(release_mod):
     issue = {"number": 7,
              "body": _body({"updated_at": "", "sessions": [_session_dict()]}),
              "assignees": [{"login": "alice"}]}
-    with patch.object(release_mod, "_committed_on_primary_since",
-                      return_value=False), \
+    with patch.object(release_mod, "_should_release", return_value=False), \
          patch.object(release_mod, "_run") as run_mock:
         result = release_mod._process_issue("o/r", issue, "main")
     assert result == "no-change"
@@ -99,8 +138,6 @@ def test_process_issue_no_change_when_nothing_landed(release_mod):
 
 
 def test_process_issue_edits_when_some_paths_release(release_mod):
-    """Session has two paths; one is now on main, the other still pending
-    → edit body, keep issue open."""
     s = _session_dict()
     s["declared_files"] = [
         {"path": "merged.py", "declared_at": "2026-04-15T10:00:00Z"},
@@ -110,11 +147,10 @@ def test_process_issue_edits_when_some_paths_release(release_mod):
              "body": _body({"updated_at": "", "sessions": [s]}),
              "assignees": [{"login": "alice"}]}
 
-    def stub_committed(primary, path, since):
+    def stub(primary, branch, path, declared_at):
         return path == "merged.py"
 
-    with patch.object(release_mod, "_committed_on_primary_since",
-                      side_effect=stub_committed), \
+    with patch.object(release_mod, "_should_release", side_effect=stub), \
          patch.object(release_mod, "_run") as run_mock:
         result = release_mod._process_issue("o/r", issue, "main")
     assert result == "edited"
@@ -130,8 +166,7 @@ def test_process_issue_closes_when_all_released(release_mod):
     issue = {"number": 7,
              "body": _body({"updated_at": "", "sessions": [_session_dict("only.py")]}),
              "assignees": [{"login": "alice"}]}
-    with patch.object(release_mod, "_committed_on_primary_since",
-                      return_value=True), \
+    with patch.object(release_mod, "_should_release", return_value=True), \
          patch.object(release_mod, "_run") as run_mock:
         result = release_mod._process_issue("o/r", issue, "main")
     assert result == "closed"
@@ -140,19 +175,19 @@ def test_process_issue_closes_when_all_released(release_mod):
     assert any(c[:3] == ["gh", "issue", "close"] for c in cmds)
 
 
-def test_process_issue_sweeps_stale_entry_from_prior_push(release_mod):
-    """Regression for the user-reported bug: an entry whose path was
-    merged in a PRIOR push (where the Action failed or wasn't installed)
-    must be released in a subsequent Action run. The current push's
-    diff is irrelevant — only `origin/<primary>` presence after
-    declared_at matters."""
-    s = _session_dict("old.py", declared_at="2026-04-10T00:00:00Z")
+def test_process_issue_sweeps_squash_merge_net_zero(release_mod):
+    """Regression for user-reported case: file added+deleted on feature
+    branch, squash-merged to main. Primary has no commit touching the
+    path, so commit-based check would miss it — but content-diff between
+    origin/<branch> and origin/<primary> is empty (neither has the
+    file), so _should_release returns True via the sync path."""
+    s = _session_dict("temp.md", branch="yoink-test")
     issue = {"number": 7,
              "body": _body({"updated_at": "", "sessions": [s]}),
              "assignees": [{"login": "alice"}]}
 
-    # The merge commit for old.py happened a while back, but sweep catches it.
-    with patch.object(release_mod, "_committed_on_primary_since",
+    with patch.object(release_mod, "_ensure_remote_branch", return_value=True), \
+         patch.object(release_mod, "_path_synced_with_primary",
                       return_value=True), \
          patch.object(release_mod, "_run"):
         result = release_mod._process_issue("o/r", issue, "main")
@@ -166,11 +201,10 @@ def test_process_issue_drops_one_session_keeps_other(release_mod):
              "body": _body({"updated_at": "", "sessions": [s1, s2]}),
              "assignees": [{"login": "alice"}]}
 
-    def stub_committed(primary, path, since):
+    def stub(primary, branch, path, declared_at):
         return path == "only.py"
 
-    with patch.object(release_mod, "_committed_on_primary_since",
-                      side_effect=stub_committed), \
+    with patch.object(release_mod, "_should_release", side_effect=stub), \
          patch.object(release_mod, "_run") as run_mock:
         result = release_mod._process_issue("o/r", issue, "main")
     assert result == "edited"
