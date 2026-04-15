@@ -73,7 +73,7 @@ def main() -> int:
 
         if not github.label_exists(label_status):
             print(f"[yoink] label '{label_status}' not present in this repo; skipping. "
-                  f"Run `yoink-bootstrap` to opt in.", file=sys.stderr)
+                  f"Run `/yoink-coordination:bootstrap` to opt in.", file=sys.stderr)
             return 0
 
         try:
