@@ -87,6 +87,42 @@ def test_path_hash_differs_for_different_paths():
     assert telemetry.path_hash("a.py") != telemetry.path_hash("b.py")
 
 
+def test_emit_persists_jsonl_line_to_log_file():
+    """Every emit() call must also append a JSON line to YOINK_METRIC_LOG."""
+    import os
+    telemetry.emit("h1", "m1", a=1)
+    telemetry.emit("h2", "m2", b="x")
+    log_path = Path(os.environ["YOINK_METRIC_LOG"])
+    assert log_path.exists()
+    lines = log_path.read_text().splitlines()
+    assert len(lines) == 2
+    payload1 = json.loads(lines[0])
+    payload2 = json.loads(lines[1])
+    assert payload1["hook"] == "h1" and payload1["metric"] == "m1" and payload1["a"] == 1
+    assert payload2["hook"] == "h2" and payload2["metric"] == "m2" and payload2["b"] == "x"
+
+
+def test_emit_auto_creates_parent_directory(tmp_path, monkeypatch):
+    """If ~/.claude/logs/yoink/ does not exist, emit() creates it."""
+    target = tmp_path / "nested" / "path" / "metric.jsonl"
+    monkeypatch.setenv("YOINK_METRIC_LOG", str(target))
+    assert not target.parent.exists()
+    telemetry.emit("h", "m")
+    assert target.exists()
+    assert len(target.read_text().splitlines()) == 1
+
+
+def test_emit_fails_silent_on_io_error(capsys, monkeypatch):
+    """A broken log sink must never block the hook (stderr line still emits)."""
+    # Point log to a path where mkdir will refuse (root-level file as parent).
+    monkeypatch.setenv("YOINK_METRIC_LOG", "/proc/1/cannot-write-here/metric.jsonl")
+    telemetry.emit("h", "m", k=1)
+    # Stderr line still present
+    err = capsys.readouterr().err
+    assert "[yoink-metric]" in err
+    # No exception raised
+
+
 def test_emit_always_includes_common_keys(capsys):
     """Common key set {ts, hook, metric} must be present even with no fields."""
     telemetry.emit("h", "m")
