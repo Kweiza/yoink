@@ -29,6 +29,16 @@ def _log_path() -> Path:
     return Path.home() / ".claude" / "logs" / "yoink" / "metric.jsonl"
 
 
+def _repo_hash() -> str | None:
+    """SHA1[:8] of CLAUDE_PROJECT_DIR so participant jsonl from multiple repos
+    can be sliced in analysis. Returns None when env is unset (e.g., tests,
+    hooks invoked outside Claude Code)."""
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if not project_dir:
+        return None
+    return hashlib.sha1(project_dir.encode("utf-8")).hexdigest()[:8]
+
+
 def _persist(line: str) -> None:
     """Append one JSON line to the jsonl log. Fail-silent on IOError
     so a broken log sink never blocks the hook."""
@@ -49,12 +59,15 @@ def emit(hook: str, metric: str, /, **fields: Any) -> None:
     kwargs cannot shadow the common keys — doing so raises TypeError so
     spec↔runtime crosscheck (spec §9.5) stays stable.
     """
-    reserved = {"ts", "hook", "metric"} & fields.keys()
+    reserved = {"ts", "hook", "metric", "repo_hash"} & fields.keys()
     if reserved:
         raise TypeError(
             f"emit(): fields shadow reserved common keys: {sorted(reserved)}"
         )
     payload = {"ts": _now_iso(), "hook": hook, "metric": metric}
+    repo = _repo_hash()
+    if repo is not None:
+        payload["repo_hash"] = repo
     payload.update(fields)
     line = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     print(f"[yoink-metric] {line}", file=sys.stderr)

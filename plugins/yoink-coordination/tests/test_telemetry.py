@@ -123,6 +123,45 @@ def test_emit_fails_silent_on_io_error(capsys, monkeypatch):
     # No exception raised
 
 
+def test_emit_includes_repo_hash_when_project_dir_set(capsys, monkeypatch):
+    """When CLAUDE_PROJECT_DIR is set, emit() adds `repo_hash` common field."""
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/some/repo/path")
+    telemetry.emit("h", "m")
+    line = _parse_metric_lines(capsys.readouterr().err)[0]
+    assert "repo_hash" in line
+    import hashlib as _h
+    expected = _h.sha1(b"/some/repo/path").hexdigest()[:8]
+    assert line["repo_hash"] == expected
+
+
+def test_emit_omits_repo_hash_when_project_dir_unset(capsys, monkeypatch):
+    """Without CLAUDE_PROJECT_DIR, `repo_hash` must NOT appear in payload."""
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    telemetry.emit("h", "m")
+    line = _parse_metric_lines(capsys.readouterr().err)[0]
+    assert "repo_hash" not in line
+
+
+def test_emit_repo_hash_is_stable_per_path(capsys, monkeypatch):
+    """Same CLAUDE_PROJECT_DIR yields same repo_hash; different paths differ."""
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/repo/one")
+    telemetry.emit("h", "m")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/repo/one")
+    telemetry.emit("h", "m")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/repo/two")
+    telemetry.emit("h", "m")
+    lines = _parse_metric_lines(capsys.readouterr().err)
+    assert lines[0]["repo_hash"] == lines[1]["repo_hash"]
+    assert lines[0]["repo_hash"] != lines[2]["repo_hash"]
+
+
+def test_emit_rejects_repo_hash_as_caller_kwarg(capsys):
+    """repo_hash is a reserved common key — caller cannot shadow it."""
+    import pytest
+    with pytest.raises(TypeError, match="reserved"):
+        telemetry.emit("h", "m", repo_hash="injected")
+
+
 def test_emit_always_includes_common_keys(capsys):
     """Common key set {ts, hook, metric} must be present even with no fields."""
     telemetry.emit("h", "m")
