@@ -322,3 +322,41 @@ def test_upsubmit_empty_summary_prints_reminder_and_no_cache(tmp_path, monkeypat
     out = capsys.readouterr()
     assert "SYSTEM INSTRUCTION" in out.out  # reminder printed
     assert hook.task_cache.is_set("/wt", "main") is False  # NOT cached
+
+
+def test_upsubmit_no_entry_now_prints_reminder(tmp_path, monkeypatch, capsys):
+    """v0.3.16: no entry yet → still print reminder so Claude is told to
+    record the task BEFORE doing the file edit (otherwise the reminder
+    fires one prompt late)."""
+    import importlib, sys as _sys
+    from pathlib import Path as _Path
+    hooks = _Path(__file__).resolve().parents[1] / "hooks"
+    if str(hooks) not in _sys.path:
+        _sys.path.insert(0, str(hooks))
+    monkeypatch.setenv("YOINK_TASK_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    import task_cache as tc
+    importlib.reload(tc)
+    import user_prompt_submit as hook
+    importlib.reload(hook)
+
+    from types import SimpleNamespace
+    fake_ctx = SimpleNamespace(
+        login="alice", repo_name_with_owner="o/r",
+        worktree_path="/wt", branch="main",
+        session_id="s", claude_session_id="ccs",
+        task_issue=None, started_at="2026-04-15T10:00:00Z",
+    )
+    monkeypatch.setattr(hook.ctx_mod, "build_context", lambda: fake_ctx)
+    monkeypatch.setattr(hook.github, "gh_auth_ok", lambda: True)
+    monkeypatch.setattr(hook.github, "list_my_status_issues", lambda l, lab: [])
+    monkeypatch.setattr(
+        hook.cfg_mod, "load_config",
+        lambda d: (SimpleNamespace(label_prefix="yoink"), []),
+    )
+    rc = hook.run(stdin_text='{"session_id":"ccs"}')
+    assert rc == 0
+    out = capsys.readouterr()
+    assert "SYSTEM INSTRUCTION" in out.out
+    # Still no cache stamp on no-entry — next prompt re-checks.
+    assert tc.is_set("/wt", "main") is False

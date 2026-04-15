@@ -55,37 +55,49 @@ def main(argv: list[str]) -> int:
         with lock.acquire(_lock_path(ctx.login, ctx.repo_name_with_owner),
                           timeout=cfg.lock_timeout_seconds):
             issues = github.list_my_status_issues(ctx.login, label_status)
-            # v0.3.10: a session entry only exists once a file has been
-            # declared via PreToolUse. If there's no issue, no session
-            # entry, or an entry with no declared_files, refuse — task
-            # recording without a file hold has no coordination value.
-            _NO_HOLD_MSG = (
-                "[yoink] no declared files in this session yet — "
-                "edit or create a file first, then record the task."
-            )
+            # v0.3.16: task can be recorded BEFORE any file declare so the
+            # reminder loop ("record task → then edit") works on the very
+            # first prompt. Lazy-create issue+entry as needed.
             if not issues:
-                print(_NO_HOLD_MSG, file=sys.stderr)
-                return 1
-            issues.sort(key=lambda i: i["number"])
-            issue = issues[0]
-            num = issue["number"]
-            existing = issue.get("body", "")
-            parsed, _ = state_mod.parse_body(existing)
+                num = github.create_status_issue(ctx.login, label_status)
+                if num is None:
+                    print("[yoink] failed to create status issue.", file=sys.stderr)
+                    return 1
+                parsed = state_mod.State(updated_at="")
+                existing = ""
+                label_active = _label(cfg.label_prefix, constants.LABEL_SUFFIX_ACTIVE)
+                try:
+                    github.add_label(num, label_active)
+                except Exception:
+                    pass
+            else:
+                issues.sort(key=lambda i: i["number"])
+                issue = issues[0]
+                num = issue["number"]
+                existing = issue.get("body", "")
+                parsed, _ = state_mod.parse_body(existing)
 
-            # Match by worktree + branch first; if multiple, pick the latest
-            # started.
-            matches = [
-                s for s in parsed.sessions
-                if s.worktree_path == ctx.worktree_path and s.branch == ctx.branch
-            ]
-            if not matches:
-                print(_NO_HOLD_MSG, file=sys.stderr)
-                return 1
-            matches.sort(key=lambda s: s.started_at, reverse=True)
-            if not (matches[0].declared_files or []):
-                print(_NO_HOLD_MSG, file=sys.stderr)
-                return 1
-            matches[0].task_summary = summary
+            # Match by (worktree, branch) per v0.3.15 single-rule model.
+            target = None
+            for s in parsed.sessions:
+                if (s.worktree_path == ctx.worktree_path
+                        and s.branch == ctx.branch):
+                    target = s
+                    break
+            if target is None:
+                target = state_mod.Session(
+                    session_id=ctx.session_id,
+                    worktree_path=ctx.worktree_path,
+                    branch=ctx.branch,
+                    task_issue=ctx.task_issue,
+                    started_at=ctx.started_at,
+                    last_heartbeat=ctx.started_at,
+                    declared_files=[],
+                    driven_by=constants.DRIVEN_BY_CLAUDE_CODE,
+                    claude_session_id=ctx.claude_session_id,
+                )
+                parsed.sessions.append(target)
+            target.task_summary = summary
 
             parsed.updated_at = ctx_mod.now_utc_iso()
             new_body = state_mod.render_body(

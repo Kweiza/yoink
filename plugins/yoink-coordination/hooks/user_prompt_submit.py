@@ -121,13 +121,17 @@ def run(stdin_text: Optional[str] = None) -> int:
             if state == _STATE_SET:
                 task_cache.mark_set(ctx.worktree_path, ctx.branch)
                 return 0
-            if state == _STATE_EMPTY:
+            if state in (_STATE_EMPTY, _STATE_NO_ENTRY):
+                # v0.3.16: also nag when no entry exists yet. The previous
+                # silent-on-no-entry policy made the reminder fire one
+                # prompt LATE — by the time the entry was created in
+                # PreToolUse, the user's request that triggered the edit
+                # had already been processed without Claude seeing the
+                # reminder. Now Claude is told from the first prompt to
+                # record the task before any file action.
                 print(_REMINDER)
                 return 0
-            # _STATE_NO_ENTRY / _STATE_ERROR — silent, do NOT mark cache.
-            # The session may declare a file later this turn; we want the
-            # next prompt's UserPromptSubmit to re-check rather than be
-            # frozen into the fast path.
+            # _STATE_ERROR — silent, do NOT mark cache.
         except Exception as e:
             print(f"[yoink] UserPromptSubmit reminder failed: {e}",
                   file=sys.stderr)
