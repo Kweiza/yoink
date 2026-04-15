@@ -217,15 +217,24 @@ def run(stdin_text: Optional[str] = None) -> int:
         cfg = _load_config(project_dir)
         label_status = _label(cfg.label_prefix, constants.LABEL_SUFFIX_STATUS)
 
+        label_active = _label(cfg.label_prefix, constants.LABEL_SUFFIX_ACTIVE)
+
         # 5. Lock
         try:
             with _acquire_lock_ctx(_lock_path(ctx.login, ctx.repo_name_with_owner),
                                    timeout=cfg.lock_timeout_seconds):
-                # 6. Fetch my issue
+                # 6. Fetch my issue (create lazily on first declare — v0.3.10)
                 num, parsed, existing = _fetch_my_issue(ctx.login, label_status)
+                issue_created = False
                 if num is None:
-                    print("[yoink] no status issue found; skipping acquire.", file=sys.stderr)
-                    return 0
+                    num = github.create_status_issue(ctx.login, label_status)
+                    if num is None:
+                        print("[yoink] failed to create status issue; skipping acquire.", file=sys.stderr)
+                        return 0
+                    parsed = state_mod.State(updated_at="")
+                    existing = ""
+                    issue_created = True
+                    telemetry.emit("pre_tool_use", "issue_create")
                 me = _find_my_session(parsed, hook_session_id, ctx)
                 reconciled = False
                 if me is None:
@@ -293,9 +302,13 @@ def run(stdin_text: Optional[str] = None) -> int:
                 cooldown_expired = _heartbeat_cooldown_expired(
                     me.last_heartbeat, now, cfg.heartbeat_cooldown_seconds,
                 )
-                if changed or removed or cooldown_expired or reconciled:
+                if changed or removed or cooldown_expired or reconciled or issue_created:
                     me.last_heartbeat = now
                     _write_body(num, ctx.login, parsed, existing)
+                if issue_created:
+                    # Only attach yoink:active when this hook actually created
+                    # the issue — avoids a redundant label call on every edit.
+                    github.add_label(num, label_active)
                 if conflicting_owners:
                     msg = warning.format_conflict(
                         path=norm, owners=conflicting_owners,

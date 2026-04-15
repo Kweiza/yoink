@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""yoink-coordination SessionStart hook. See spec §4.1."""
+"""yoink-coordination SessionStart hook. See spec §4.1.
+
+v0.3.10 lazy-session change: SessionStart no longer creates a yoink:status
+issue or registers a session entry. A session entry is only declared when
+the session actually modifies a file (handled in PreToolUse). SessionStart
+still performs self-heal on my existing entries (if the issue already
+exists) and prints peer activity for context.
+"""
 from __future__ import annotations
 import os
 import re
@@ -11,7 +18,6 @@ sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
 import constants, github, context as ctx_mod, config as cfg_mod, state as state_mod, lock, render, claim  # noqa: E402
 import telemetry  # noqa: E402
-from dataclasses import asdict  # noqa: E402
 
 def _label(prefix: str, suffix: str) -> str:
     return f"{prefix}:{suffix}"
@@ -19,28 +25,6 @@ def _label(prefix: str, suffix: str) -> str:
 def _lock_path(login: str, repo: str) -> Path:
     slug = re.sub(r"[^A-Za-z0-9]+", "__", f"{login}-{repo}")
     return constants.CACHE_DIR / f"{slug}.lock"
-
-def _upsert_session(existing: list, new_session) -> list:
-    new_key = state_mod.dedup_key(new_session)
-    out = []
-    replaced = False
-    for s in existing:
-        if state_mod.dedup_key(s) == new_key:
-            out.append(new_session); replaced = True
-        else:
-            out.append(s)
-    if not replaced:
-        out.append(new_session)
-    return out
-
-def _print_task_reminder():
-    """One-line nudge in SessionStart stdout so Claude records this session's
-    goal. UserPromptSubmit hook re-injects on every user turn until set."""
-    print(
-        "[yoink] At the start of your work in this session, record the goal:\n"
-        "        /yoink-coordination:task \"<1~2 sentence summary>\"\n"
-        "        Teammates see this in the yoink:status issue body."
-    )
 
 
 def _print_other_members(ctx, cfg):
@@ -79,24 +63,18 @@ def main() -> int:
             print(f"[yoink] {w}", file=sys.stderr)
 
         label_status = _label(cfg.label_prefix, constants.LABEL_SUFFIX_STATUS)
-        label_active = _label(cfg.label_prefix, constants.LABEL_SUFFIX_ACTIVE)
 
         if not github.label_exists(label_status):
             print(f"[yoink] label '{label_status}' not present in this repo; skipping. "
                   f"Run `/yoink-coordination:bootstrap` to opt in.", file=sys.stderr)
             return 0
 
+        # v0.3.10: Do not create an issue here. Only self-heal if one exists.
         try:
             lockfile = _lock_path(ctx.login, ctx.repo_name_with_owner)
             with lock.acquire(lockfile, timeout=cfg.lock_timeout_seconds):
                 issues = github.list_my_status_issues(ctx.login, label_status)
-                if not issues:
-                    num = github.create_status_issue(ctx.login, label_status)
-                    if num is None:
-                        print("[yoink] failed to create status issue", file=sys.stderr)
-                        return 0
-                    existing_body = ""
-                else:
+                if issues:
                     issues.sort(key=lambda i: i["number"])
                     primary = issues[0]
                     num = primary["number"]
@@ -105,50 +83,30 @@ def main() -> int:
                         print(f"[yoink] multiple status issues found; using #{num}. "
                               f"Duplicates: {', '.join(f'#{n}' for n in extras)}. "
                               f"Please close or merge them manually.", file=sys.stderr)
-                    if primary["state"] == "CLOSED":
-                        github.reopen_issue(num)
                     existing_body = primary.get("body", "")
-
-                parsed, corrupt = state_mod.parse_body(existing_body)
-                if corrupt:
-                    print(f"[yoink] body of issue #{num} was unparseable; reinitializing.", file=sys.stderr)
-
-                # Phase 4 §5: remove my own stale entries before upserting new.
-                stale = claim.find_stale_sessions(
-                    parsed.sessions,
-                    now_iso=ctx_mod.now_utc_iso(),
-                    threshold_seconds=cfg.stale_threshold_seconds,
-                )
-                if stale:
-                    parsed.sessions = claim.remove_sessions(parsed.sessions, stale)
-                    print(f"[yoink] self-heal: removed {len(stale)} stale session(s)", file=sys.stderr)
-                    telemetry.emit("session_start", "self_heal", stale_removed=len(stale))
-
-                session = state_mod.Session(
-                    session_id=ctx.session_id,
-                    worktree_path=ctx.worktree_path,
-                    branch=ctx.branch,
-                    task_issue=ctx.task_issue,
-                    started_at=ctx.started_at,
-                    last_heartbeat=ctx.started_at,
-                    declared_files=[],
-                    driven_by="claude-code",
-                    claude_session_id=ctx.claude_session_id,
-                )
-                parsed.sessions = _upsert_session(parsed.sessions, session)
-                parsed.updated_at = ctx_mod.now_utc_iso()
-                new_body = state_mod.render_body(parsed, login=ctx.login, preserve_tail_from=existing_body)
-                if state_mod.body_exceeds_limit(new_body):
-                    print("[yoink] warning: issue body exceeds 65536-char limit; "
-                          "GitHub edit will fail. Phase 3 will add eviction policy.", file=sys.stderr)
-                github.edit_issue_body(num, new_body)
-                github.add_label(num, label_active)
+                    parsed, corrupt = state_mod.parse_body(existing_body)
+                    if corrupt:
+                        print(f"[yoink] body of issue #{num} was unparseable; leaving untouched.", file=sys.stderr)
+                    else:
+                        stale = claim.find_stale_sessions(
+                            parsed.sessions,
+                            now_iso=ctx_mod.now_utc_iso(),
+                            threshold_seconds=cfg.stale_threshold_seconds,
+                        )
+                        if stale:
+                            parsed.sessions = claim.remove_sessions(parsed.sessions, stale)
+                            parsed.updated_at = ctx_mod.now_utc_iso()
+                            print(f"[yoink] self-heal: removed {len(stale)} stale session(s)", file=sys.stderr)
+                            telemetry.emit("session_start", "self_heal", stale_removed=len(stale))
+                            new_body = state_mod.render_body(parsed, login=ctx.login, preserve_tail_from=existing_body)
+                            if state_mod.body_exceeds_limit(new_body):
+                                print("[yoink] warning: issue body exceeds 65536-char limit.", file=sys.stderr)
+                            github.edit_issue_body(num, new_body)
         except lock.LockTimeout:
-            print("[yoink] lock timeout; skipping body update for this session start.", file=sys.stderr)
+            print("[yoink] lock timeout; skipping self-heal for this session start.", file=sys.stderr)
             return 0
 
         _print_other_members(ctx, cfg)
-        _print_task_reminder()
         return 0
 
 if __name__ == "__main__":

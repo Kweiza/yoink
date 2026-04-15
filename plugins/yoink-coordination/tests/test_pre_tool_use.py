@@ -298,3 +298,84 @@ def test_pre_tool_use_emits_conflict_with_path_hash_only(tmp_path, capsys):
     metric_lines_raw = [ln for ln in err.splitlines() if ln.startswith("[yoink-metric] ")]
     for ln in metric_lines_raw:
         assert target_relpath not in ln, f"Raw path leaked into metric line: {ln}"
+
+
+# ---------------------------------------------------------------
+# v0.3.10 lazy-create: PreToolUse creates the issue when absent
+# ---------------------------------------------------------------
+def test_pretooluse_lazy_creates_issue_on_first_declare(tmp_path):
+    """Issue absent + file edit → create issue, insert session, write body,
+    add yoink:active label."""
+    payload = _hook_input(file_path=str(tmp_path / "src" / "foo.py"))
+
+    writes = []
+    created_nums = []
+    labels = []
+
+    def fake_fetch(login, label):
+        return (None, None, "")  # triggers create path
+
+    def fake_create(login, label):
+        return 77
+
+    def fake_write(num, login, parsed, existing):
+        writes.append((num, login, parsed))
+        return True
+
+    with patch.object(hook, "_project_dir", return_value=tmp_path), \
+         patch.object(hook, "_is_gitignored", return_value=False), \
+         patch.object(hook, "_gh_auth_ok", return_value=True), \
+         patch.object(hook, "_load_config", return_value=_cfg()), \
+         patch.object(hook, "_acquire_lock_ctx", _fake_lock_ctx()), \
+         patch.object(hook, "_fetch_my_issue", side_effect=fake_fetch), \
+         patch.object(hook, "_fetch_others", return_value=[]), \
+         patch.object(hook, "_write_body", side_effect=fake_write), \
+         patch("pre_tool_use.github.create_status_issue",
+               side_effect=fake_create), \
+         patch("pre_tool_use.github.add_label",
+               side_effect=lambda n, lbl: labels.append((n, lbl))), \
+         patch("pre_tool_use.gitops.working_tree_paths", return_value=set()), \
+         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx()):
+        rc = hook.run(stdin_text=payload)
+
+    assert rc == 0
+    assert len(writes) == 1
+    num, _login, parsed = writes[0]
+    assert num == 77
+    # Session entry was synthesized and declared the file
+    assert len(parsed.sessions) == 1
+    assert parsed.sessions[0].declared_files
+    # yoink:active label attached once
+    assert labels == [(77, "yoink:active")]
+
+
+def test_pretooluse_lazy_create_fails_returns_zero(tmp_path, capsys):
+    """Create-issue failure → fail-open (exit 0, no body write, no label)."""
+    payload = _hook_input(file_path=str(tmp_path / "src" / "foo.py"))
+
+    writes = []
+    labels = []
+
+    def fake_fetch(login, label):
+        return (None, None, "")
+
+    with patch.object(hook, "_project_dir", return_value=tmp_path), \
+         patch.object(hook, "_is_gitignored", return_value=False), \
+         patch.object(hook, "_gh_auth_ok", return_value=True), \
+         patch.object(hook, "_load_config", return_value=_cfg()), \
+         patch.object(hook, "_acquire_lock_ctx", _fake_lock_ctx()), \
+         patch.object(hook, "_fetch_my_issue", side_effect=fake_fetch), \
+         patch.object(hook, "_fetch_others", return_value=[]), \
+         patch.object(hook, "_write_body",
+                      side_effect=lambda *a, **k: writes.append(a) or True), \
+         patch("pre_tool_use.github.create_status_issue",
+               return_value=None), \
+         patch("pre_tool_use.github.add_label",
+               side_effect=lambda n, lbl: labels.append((n, lbl))), \
+         patch("pre_tool_use.gitops.working_tree_paths", return_value=set()), \
+         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx()):
+        rc = hook.run(stdin_text=payload)
+
+    assert rc == 0
+    assert writes == []
+    assert labels == []

@@ -5,15 +5,17 @@ from pathlib import Path
 HOOKS = Path(__file__).resolve().parents[1] / "hooks"
 sys.path.insert(0, str(HOOKS))
 
+# v0.3.10: SessionStart no longer creates issues or registers sessions.
+# First file edit (PreToolUse) handles lazy creation.
 @patch("github.label_exists", return_value=True)
 @patch("github.gh_auth_ok", return_value=True)
 @patch("github.list_my_status_issues")
-@patch("github.create_status_issue", return_value=42)
+@patch("github.create_status_issue")
 @patch("github.edit_issue_body", return_value=True)
 @patch("github.add_label", return_value=True)
 @patch("github.list_other_status_issues_open", return_value=[])
 @patch("context.build_context")
-def test_first_session_creates_issue(bc, other, addlbl, edit, create, my, auth, labels, tmp_path, monkeypatch):
+def test_first_session_does_not_create_issue(bc, other, addlbl, edit, create, my, auth, labels, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     from context import Context
     bc.return_value = Context("alice", "o/r", "feature/7-x", str(tmp_path),
@@ -22,9 +24,9 @@ def test_first_session_creates_issue(bc, other, addlbl, edit, create, my, auth, 
     import session_start
     rc = session_start.main()
     assert rc == 0
-    create.assert_called_once_with("alice", "yoink:status")
-    edit.assert_called_once()
-    addlbl.assert_called_with(42, "yoink:active")
+    create.assert_not_called()
+    edit.assert_not_called()
+    addlbl.assert_not_called()
 
 @patch("github.label_exists", return_value=False)
 @patch("github.gh_auth_ok", return_value=True)
@@ -47,7 +49,9 @@ def test_missing_label_skips(bc, auth, labels, tmp_path, monkeypatch, capsys):
 @patch("github.add_label", return_value=True)
 @patch("github.list_other_status_issues_open", return_value=[])
 @patch("context.build_context")
-def test_multiple_issues_picks_lowest_and_warns(bc, other, addlbl, edit, my, auth, labels, tmp_path, monkeypatch, capsys):
+def test_multiple_issues_warns_on_duplicates(bc, other, addlbl, edit, my, auth, labels, tmp_path, monkeypatch, capsys):
+    """v0.3.10: with no stale sessions to heal, SessionStart still warns
+    about duplicate issues but does not edit bodies."""
     monkeypatch.chdir(tmp_path)
     from context import Context
     bc.return_value = Context("alice", "o/r", "main", str(tmp_path),
@@ -60,8 +64,7 @@ def test_multiple_issues_picks_lowest_and_warns(bc, other, addlbl, edit, my, aut
     import session_start
     rc = session_start.main()
     assert rc == 0
-    edit.assert_called_once()
-    assert edit.call_args.args[0] == 4
+    edit.assert_not_called()
     err = capsys.readouterr().err
     assert "#7" in err and "#9" in err
 
@@ -140,7 +143,9 @@ def test_session_start_removes_stale_self_entries(capsys, monkeypatch):
     assert len(writes) == 1
     _, written_body = writes[0]
     assert "stale-uuid" not in written_body
-    assert "new-uuid" in written_body
+    # v0.3.10: new session is NOT upserted here; that happens on first
+    # file declare in PreToolUse.
+    assert "new-uuid" not in written_body
 
 
 # ------------------------------------------------------------------
