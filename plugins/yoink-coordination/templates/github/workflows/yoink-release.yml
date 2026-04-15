@@ -23,4 +23,17 @@ jobs:
           AFTER: ${{ github.sha }}
           REPO: ${{ github.repository }}
           PRIMARY: ${{ github.event.repository.default_branch }}
-        run: python3 .github/yoink/release.py
+          # GH_HOST is also auto-detected inside release.py from
+          # GITHUB_SERVER_URL, but pin it here so `gh` is configured
+          # even if release.py exits early.
+          GH_HOST: ${{ github.server_url == 'https://github.com' && 'github.com' || '' }}
+        run: |
+          set -e
+          # Strip scheme from GITHUB_SERVER_URL for gh CLI
+          HOST="${GITHUB_SERVER_URL#https://}"
+          HOST="${HOST#http://}"
+          HOST="${HOST%/}"
+          if [ "$HOST" != "github.com" ] && [ -n "$HOST" ]; then
+            export GH_HOST="$HOST"
+          fi
+          python3 .github/yoink/release.py

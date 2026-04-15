@@ -34,6 +34,32 @@ LABEL_STATUS = "yoink:status"
 LABEL_ACTIVE = "yoink:active"
 
 
+def _configure_gh_host():
+    """Point `gh` CLI at the same GitHub server the Action runs on.
+
+    On GitHub Enterprise Server, GITHUB_SERVER_URL is set to the enterprise
+    hostname (e.g. https://github.ecodesamsung.com). `gh` without
+    GH_HOST defaults to github.com → 401 Bad credentials with the
+    enterprise GITHUB_TOKEN. Strip the scheme and export GH_HOST so all
+    subsequent `gh` calls target the right server.
+    """
+    if os.environ.get("GH_HOST"):
+        return
+    server = os.environ.get("GITHUB_SERVER_URL", "").strip()
+    if not server:
+        return
+    host = server
+    for prefix in ("https://", "http://"):
+        if host.startswith(prefix):
+            host = host[len(prefix):]
+    host = host.rstrip("/")
+    if host and host != "github.com":
+        os.environ["GH_HOST"] = host
+
+
+_configure_gh_host()
+
+
 def _run(cmd, check=True, capture=True):
     p = subprocess.run(
         cmd, check=check,
