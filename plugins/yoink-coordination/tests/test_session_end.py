@@ -116,3 +116,40 @@ def test_session_end_emits_latency_on_main(capsys, monkeypatch):
     latency = [p for p in parsed if p["metric"] == "latency"]
     assert len(latency) == 1
     assert latency[0]["hook"] == "session_end"
+
+
+def test_session_end_clears_task_stamp(tmp_path, monkeypatch):
+    """v0.3.12: SessionEnd drops the stamp so the next session starts
+    with a fresh prompt."""
+    import importlib, sys as _sys
+    from pathlib import Path as _Path
+    hooks = _Path(__file__).resolve().parents[1] / "hooks"
+    if str(hooks) not in _sys.path:
+        _sys.path.insert(0, str(hooks))
+    monkeypatch.setenv("YOINK_TASK_CACHE_ROOT", str(tmp_path / "cache"))
+    import task_cache as tc
+    importlib.reload(tc)
+    import session_end as hook
+    importlib.reload(hook)
+
+    tc.mark_set("/wt", "main")
+    assert tc.is_set("/wt", "main") is True
+
+    from types import SimpleNamespace
+    fake_ctx = SimpleNamespace(
+        login="alice", repo_name_with_owner="o/r",
+        worktree_path="/wt", branch="main",
+        session_id="s", claude_session_id="ccs",
+        task_issue=None, started_at="2026-04-15T10:00:00Z",
+    )
+    monkeypatch.setattr(hook.github, "gh_auth_ok", lambda: True)
+    monkeypatch.setattr(hook.github, "label_exists", lambda l: False)
+    monkeypatch.setattr(hook.ctx_mod, "build_context", lambda: fake_ctx)
+    monkeypatch.setattr(
+        hook.cfg_mod, "load_config",
+        lambda d: (SimpleNamespace(label_prefix="yoink",
+                                    lock_timeout_seconds=10), []),
+    )
+    rc = hook.main()
+    assert rc == 0
+    assert hook.task_cache.is_set("/wt", "main") is False

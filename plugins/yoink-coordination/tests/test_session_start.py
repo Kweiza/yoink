@@ -257,3 +257,44 @@ def test_session_start_emits_self_heal_when_stale_removed(capsys, monkeypatch):
     assert self_heal[0]["stale_removed"] == 1
     latency = [l for l in lines if l["metric"] == "latency"]
     assert len(latency) == 1
+
+
+def test_session_start_clears_task_stamp(tmp_path, monkeypatch):
+    """v0.3.12: SessionStart unconditionally clears any (worktree, branch)
+    task stamp left by a previous session, so the new session's first
+    user prompt re-fires the reminder."""
+    import importlib, sys as _sys
+    from pathlib import Path as _Path
+    hooks = _Path(__file__).resolve().parents[1] / "hooks"
+    if str(hooks) not in _sys.path:
+        _sys.path.insert(0, str(hooks))
+    monkeypatch.setenv("YOINK_TASK_CACHE_ROOT", str(tmp_path / "cache"))
+    import task_cache as tc
+    importlib.reload(tc)
+    import session_start as hook
+    importlib.reload(hook)
+
+    # Pre-stamp from a prior session
+    tc.mark_set("/wt", "main")
+    assert tc.is_set("/wt", "main") is True
+
+    from types import SimpleNamespace
+    fake_ctx = SimpleNamespace(
+        login="alice", repo_name_with_owner="o/r",
+        worktree_path="/wt", branch="main",
+        session_id="s-new", claude_session_id="ccs-new",
+        task_issue=None, started_at="2026-04-15T10:00:00Z",
+    )
+    monkeypatch.setattr(hook.github, "gh_auth_ok", lambda: True)
+    monkeypatch.setattr(hook.github, "label_exists", lambda l: False)  # short-circuit
+    monkeypatch.setattr(hook.ctx_mod, "build_context", lambda: fake_ctx)
+    monkeypatch.setattr(
+        hook.cfg_mod, "load_config",
+        lambda d: (SimpleNamespace(label_prefix="yoink",
+                                    lock_timeout_seconds=10,
+                                    heartbeat_cooldown_seconds=120,
+                                    stale_threshold_seconds=900), []),
+    )
+    rc = hook.main()
+    assert rc == 0
+    assert hook.task_cache.is_set("/wt", "main") is False

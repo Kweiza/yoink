@@ -18,6 +18,7 @@ sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
 import constants, github, context as ctx_mod, config as cfg_mod, state as state_mod, lock, render, claim  # noqa: E402
 import telemetry  # noqa: E402
+import task_cache  # noqa: E402
 
 def _label(prefix: str, suffix: str) -> str:
     return f"{prefix}:{suffix}"
@@ -61,6 +62,12 @@ def main() -> int:
         cfg, warnings = cfg_mod.load_config(Path(ctx.worktree_path))
         for w in warnings:
             print(f"[yoink] {w}", file=sys.stderr)
+
+        # v0.3.12: clear any stale task stamp from a previous session on
+        # this (worktree, branch). Without this, a stamp written during
+        # session A would suppress the reminder for the entirely separate
+        # session B that follows /clear, /compact, or a fresh launch.
+        task_cache.clear(ctx.worktree_path, ctx.branch)
 
         label_status = _label(cfg.label_prefix, constants.LABEL_SUFFIX_STATUS)
 

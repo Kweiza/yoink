@@ -10,6 +10,7 @@ sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
 import constants, github, context as ctx_mod, config as cfg_mod, state as state_mod, lock  # noqa: E402
 import telemetry  # noqa: E402
+import task_cache  # noqa: E402
 from datetime import datetime, timezone
 
 
@@ -49,6 +50,9 @@ def main() -> int:
         ctx = ctx_mod.build_context()
         if ctx is None:
             return 0
+        # v0.3.12: drop the task stamp so the next session on the same
+        # (worktree, branch) re-prompts for a task summary.
+        task_cache.clear(ctx.worktree_path, ctx.branch)
         cfg, warnings = cfg_mod.load_config(Path(ctx.worktree_path))
         for w in warnings:
             print(f"[yoink] {w}", file=sys.stderr)

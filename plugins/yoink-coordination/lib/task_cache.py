@@ -53,3 +53,16 @@ def mark_set(worktree_path: str, branch: str) -> None:
         p.touch()
     except OSError:
         pass  # fail-silent: cache is best-effort
+
+
+def clear(worktree_path: str, branch: str) -> bool:
+    """Remove the stamp for (worktree, branch). Returns True iff a stamp
+    actually existed and was removed. Fail-silent on OSError."""
+    p = stamp_path(worktree_path, branch)
+    try:
+        if p.exists():
+            p.unlink()
+            return True
+    except OSError:
+        pass
+    return False
