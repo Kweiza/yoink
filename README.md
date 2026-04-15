@@ -6,7 +6,7 @@ between concurrent Claude Code sessions in the same repo.
 ## Install
 
 ```
-/plugin install yoink-coordination@Kweiza/yoink
+/plugin install yoink-coordination@kweiza/yoink
 ```
 
 Requires Claude Code v2.1.105+ and `gh` CLI authentication.
