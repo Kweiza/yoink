@@ -18,6 +18,9 @@ class Session:
     declared_files: list
     driven_by: str
     claude_session_id: Optional[str]
+    # v0.3.8+: human-entered 1-2 sentence summary of what this session is
+    # doing. Set via /yoink-coordination:task. None until recorded.
+    task_summary: Optional[str] = None
     _extra: dict = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self):
@@ -104,12 +107,71 @@ def _render_summary(state: State, login: str) -> str:
 def _cell(value) -> str:
     return str(value).replace("|", "\\|") if value is not None else "—"
 
+_TASK_SUMMARY_MAX = 60
+
+
+def format_task_cell(task_issue: Optional[str], task_summary: Optional[str]) -> str:
+    """Compose the Task column cell from issue ref and summary text.
+
+    Formats (precedence):
+      issue + summary  → `#123 · <summary>` (summary truncated)
+      issue only       → `#123`
+      summary only     → `<summary>` (truncated)
+      neither          → `—`
+
+    The issue prefix strips the `repo/owner` leading part so the cell stays
+    readable (`#123` rather than `kweiza/yoink#123` which is already clear
+    from context).
+    """
+    issue_short: Optional[str] = None
+    if task_issue:
+        idx = task_issue.find("#")
+        issue_short = task_issue[idx:] if idx != -1 else task_issue
+    summary = (task_summary or "").strip()
+    if len(summary) > _TASK_SUMMARY_MAX:
+        summary = summary[: _TASK_SUMMARY_MAX - 1].rstrip() + "…"
+    if issue_short and summary:
+        return f"{issue_short} · {summary}"
+    if issue_short:
+        return issue_short
+    if summary:
+        return summary
+    return "—"
+
+
+def format_files_cell(declared_files: list) -> str:
+    """Render declared_files for the human-facing table.
+
+    0 entries → `—`
+    1~3       → `foo.py, bar.py[, baz.py]`
+    4+        → `foo.py, bar.py, baz.py (+N)`
+
+    Order follows the list as stored (declaration order).
+    """
+    if not declared_files:
+        return "—"
+    paths = [str(e.get("path", "")) for e in declared_files if isinstance(e, dict)]
+    paths = [p for p in paths if p]
+    if not paths:
+        return "—"
+    if len(paths) <= 3:
+        return ", ".join(paths)
+    shown = ", ".join(paths[:3])
+    return f"{shown} (+{len(paths) - 3})"
+
+
 def _render_table(state: State) -> str:
-    header = "| Worktree | Branch | Task | Started | Heartbeat |\n|---|---|---|---|---|"
+    header = (
+        "| Worktree | Branch | Task | Files | Started | Heartbeat |\n"
+        "|---|---|---|---|---|---|"
+    )
     if not state.sessions:
-        return header + "\n| _(none)_ | | | | |"
+        return header + "\n| _(none)_ | | | | | |"
     rows = [
-        f"| {_cell(_basename(s.worktree_path))} | {_cell(s.branch)} | {_cell(s.task_issue or '—')} | {_cell(s.started_at)} | {_cell(s.last_heartbeat)} |"
+        f"| {_cell(_basename(s.worktree_path))} | {_cell(s.branch)} | "
+        f"{_cell(format_task_cell(s.task_issue, s.task_summary))} | "
+        f"{_cell(format_files_cell(s.declared_files or []))} | "
+        f"{_cell(s.started_at)} | {_cell(s.last_heartbeat)} |"
         for s in state.sessions
     ]
     return header + "\n" + "\n".join(rows)

@@ -1,6 +1,6 @@
 {
   "name": "yoink-coordination",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "Single-repo team coordination for Claude Code sessions",
   "author": { "name": "kweiza" },
   "hooks": {
@@ -52,6 +52,16 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/stop.py\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/user_prompt_submit.py\""
           }
         ]
       }

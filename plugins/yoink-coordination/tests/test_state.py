@@ -112,3 +112,79 @@ def test_roundtrip_preserves_unknown_phase3_fields():
     parsed, _ = parse_body(raw)
     re_rendered = render_body(parsed, login="alice")
     assert '"future_phase3_field":' in re_rendered.replace(" ", "") or '"future_phase3_field"' in re_rendered
+
+
+def test_format_task_cell_issue_and_summary():
+    from state import format_task_cell
+    assert format_task_cell("kweiza/yoink#42", "Fix login flow") == "#42 · Fix login flow"
+
+
+def test_format_task_cell_issue_only():
+    from state import format_task_cell
+    assert format_task_cell("repo#7", None) == "#7"
+
+
+def test_format_task_cell_summary_only():
+    from state import format_task_cell
+    assert format_task_cell(None, "refactor auth") == "refactor auth"
+
+
+def test_format_task_cell_neither():
+    from state import format_task_cell
+    assert format_task_cell(None, None) == "—"
+
+
+def test_format_task_cell_long_summary_truncated():
+    from state import format_task_cell
+    out = format_task_cell(None, "x" * 100)
+    assert out.endswith("…")
+    assert len(out) <= 60
+
+
+def test_format_files_cell_empty():
+    from state import format_files_cell
+    assert format_files_cell([]) == "—"
+    assert format_files_cell([{"path": ""}]) == "—"
+
+
+def test_format_files_cell_up_to_three():
+    from state import format_files_cell
+    items = [{"path": "a.py"}, {"path": "b.py"}, {"path": "c.py"}]
+    assert format_files_cell(items) == "a.py, b.py, c.py"
+
+
+def test_format_files_cell_overflow():
+    from state import format_files_cell
+    items = [{"path": f"f{i}.py"} for i in range(6)]
+    assert format_files_cell(items) == "f0.py, f1.py, f2.py (+3)"
+
+
+def test_render_body_includes_files_column_and_task_summary():
+    from state import State, Session, render_body
+    s = Session(
+        session_id="s1", worktree_path="/tmp/r", branch="feat-42",
+        task_issue="repo#42", started_at="2026-04-15T00:00:00Z",
+        last_heartbeat="2026-04-15T00:00:00Z",
+        declared_files=[{"path": "a.py", "declared_at": "t"}],
+        driven_by="claude-code", claude_session_id="ccs-1",
+        task_summary="Add 2FA",
+    )
+    body = render_body(State(updated_at="now", sessions=[s]), login="alice")
+    assert "| Worktree | Branch | Task | Files | Started | Heartbeat |" in body
+    assert "#42 · Add 2FA" in body
+    assert "a.py" in body
+
+
+def test_parse_body_roundtrips_task_summary():
+    """task_summary set via render_body must come back through parse_body."""
+    from state import State, Session, render_body, parse_body
+    s = Session(
+        session_id="s1", worktree_path="/tmp/r", branch="b",
+        task_issue=None, started_at="2026-04-15T00:00:00Z",
+        last_heartbeat="2026-04-15T00:00:00Z",
+        declared_files=[], driven_by="claude-code",
+        claude_session_id="ccs-1", task_summary="Refactor auth",
+    )
+    body = render_body(State(updated_at="now", sessions=[s]), login="alice")
+    parsed, _ = parse_body(body)
+    assert parsed.sessions[0].task_summary == "Refactor auth"

@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""yoink-set-task: record a 1~2 sentence summary of what this session is doing.
+
+Usage:
+    yoink-set-task "<summary text>"
+
+Writes `task_summary` on the current session entry in my yoink:status issue
+body. Summary is visible to teammates in the issue body's human-readable
+table alongside the branch-derived issue reference.
+
+Resolves "current session" in the same order as hooks:
+    1. CLAUDE_PROJECT_DIR env (must match a session's worktree_path)
+    2. Fallback to (worktree_path, branch) tuple
+No session_id env is available to CLI, so an ambiguous issue (multiple
+sessions in the same worktree/branch) updates the most recent.
+"""
+from __future__ import annotations
+import os
+import re
+import sys
+from pathlib import Path
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
+
+import constants, github, context as ctx_mod, config as cfg_mod, state as state_mod, lock  # noqa: E402
+
+
+def _label(prefix: str, suffix: str) -> str:
+    return f"{prefix}:{suffix}"
+
+
+def _lock_path(login: str, repo: str) -> Path:
+    slug = re.sub(r"[^A-Za-z0-9]+", "__", f"{login}-{repo}")
+    return constants.CACHE_DIR / f"{slug}.lock"
+
+
+def main(argv: list[str]) -> int:
+    summary = " ".join(argv).strip()
+    if not summary:
+        print("usage: yoink-set-task \"<1~2 sentence summary>\"", file=sys.stderr)
+        return 2
+
+    if not github.gh_auth_ok():
+        print("[yoink] gh auth missing; cannot update task.", file=sys.stderr)
+        return 1
+    ctx = ctx_mod.build_context()
+    if ctx is None:
+        print("[yoink] context unavailable (not in a repo?).", file=sys.stderr)
+        return 1
+    cfg, _ = cfg_mod.load_config(Path(ctx.worktree_path))
+    label_status = _label(cfg.label_prefix, constants.LABEL_SUFFIX_STATUS)
+
+    try:
+        with lock.acquire(_lock_path(ctx.login, ctx.repo_name_with_owner),
+                          timeout=cfg.lock_timeout_seconds):
+            issues = github.list_my_status_issues(ctx.login, label_status)
+            if not issues:
+                print("[yoink] no yoink:status issue; run "
+                      "`/yoink-coordination:bootstrap` first.", file=sys.stderr)
+                return 1
+            issues.sort(key=lambda i: i["number"])
+            issue = issues[0]
+            num = issue["number"]
+            existing = issue.get("body", "")
+            parsed, _ = state_mod.parse_body(existing)
+
+            # Match by worktree + branch first; if multiple, pick the latest
+            # started.
+            matches = [
+                s for s in parsed.sessions
+                if s.worktree_path == ctx.worktree_path and s.branch == ctx.branch
+            ]
+            if not matches:
+                print("[yoink] no matching session in issue body; start a "
+                      "Claude Code session in this repo first.",
+                      file=sys.stderr)
+                return 1
+            matches.sort(key=lambda s: s.started_at, reverse=True)
+            matches[0].task_summary = summary
+
+            parsed.updated_at = ctx_mod.now_utc_iso()
+            new_body = state_mod.render_body(
+                parsed, login=ctx.login, preserve_tail_from=existing,
+            )
+            if github.edit_issue_body(num, new_body):
+                print(f"[yoink] task recorded: {summary}")
+                return 0
+            print("[yoink] failed to update issue body.", file=sys.stderr)
+            return 1
+    except lock.LockTimeout:
+        print("[yoink] lock timeout; try again.", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

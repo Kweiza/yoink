@@ -33,6 +33,16 @@ def _upsert_session(existing: list, new_session) -> list:
         out.append(new_session)
     return out
 
+def _print_task_reminder():
+    """One-line nudge in SessionStart stdout so Claude records this session's
+    goal. UserPromptSubmit hook re-injects on every user turn until set."""
+    print(
+        "[yoink] At the start of your work in this session, record the goal:\n"
+        "        /yoink-coordination:task \"<1~2 sentence summary>\"\n"
+        "        Teammates see this in the yoink:status issue body."
+    )
+
+
 def _print_other_members(ctx, cfg):
     label = _label(cfg.label_prefix, constants.LABEL_SUFFIX_STATUS)
     others = github.list_other_status_issues_open(ctx.login, label)
@@ -138,6 +148,7 @@ def main() -> int:
             return 0
 
         _print_other_members(ctx, cfg)
+        _print_task_reminder()
         return 0
 
 if __name__ == "__main__":
