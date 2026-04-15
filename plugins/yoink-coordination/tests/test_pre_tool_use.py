@@ -84,9 +84,9 @@ def _fake_lock_ctx():
 
 
 def _empty_my_issue():
-    # returns (num, parsed_state, existing_body)
+    # returns (num, parsed_state, existing_body, was_closed)
     import state as state_mod
-    return (1, state_mod.State(updated_at=""), "")
+    return (1, state_mod.State(updated_at=""), "", False)
 
 
 def _make_session():
@@ -135,7 +135,7 @@ def test_pretooluse_cooldown_expired_triggers_heartbeat_write(tmp_path):
          patch.object(hook, "_gh_auth_ok", return_value=True), \
          patch.object(hook, "_load_config", return_value=_cfg()), \
          patch.object(hook, "_acquire_lock_ctx", _fake_lock_ctx()), \
-         patch.object(hook, "_fetch_my_issue", return_value=(1, parsed, existing_body)), \
+         patch.object(hook, "_fetch_my_issue", return_value=(1, parsed, existing_body, False)), \
          patch.object(hook, "_fetch_others", return_value=[]), \
          patch.object(hook, "_write_body", side_effect=lambda *a, **k: writes.append(a) or True), \
          patch("pre_tool_use.gitops.working_tree_paths", return_value={"already.py"}), \
@@ -172,7 +172,7 @@ def test_pretooluse_cooldown_not_expired_skips_body_write(tmp_path):
          patch.object(hook, "_gh_auth_ok", return_value=True), \
          patch.object(hook, "_load_config", return_value=_cfg()), \
          patch.object(hook, "_acquire_lock_ctx", _fake_lock_ctx()), \
-         patch.object(hook, "_fetch_my_issue", return_value=(1, parsed, existing_body)), \
+         patch.object(hook, "_fetch_my_issue", return_value=(1, parsed, existing_body, False)), \
          patch.object(hook, "_fetch_others", return_value=[]), \
          patch.object(hook, "_write_body", side_effect=lambda *a, **k: writes.append(a) or True), \
          patch("pre_tool_use.gitops.working_tree_paths", return_value={"already.py"}), \
@@ -201,7 +201,7 @@ def test_pretooluse_lazy_creates_entry_when_no_session_for_wb(tmp_path, capsys):
          patch.object(hook, "_gh_auth_ok", return_value=True), \
          patch.object(hook, "_load_config", return_value=_cfg()), \
          patch.object(hook, "_acquire_lock_ctx", _fake_lock_ctx()), \
-         patch.object(hook, "_fetch_my_issue", return_value=(1, parsed, existing_body)), \
+         patch.object(hook, "_fetch_my_issue", return_value=(1, parsed, existing_body, False)), \
          patch.object(hook, "_fetch_others", return_value=[]), \
          patch.object(hook, "_write_body", side_effect=lambda *a, **k: writes.append(a) or True), \
          patch("pre_tool_use.gitops.working_tree_paths", return_value=set()), \
@@ -256,7 +256,7 @@ def test_pre_tool_use_lazy_create_does_not_emit_refetch(tmp_path, capsys):
          patch.object(hook, "_gh_auth_ok", return_value=True), \
          patch.object(hook, "_load_config", return_value=_cfg()), \
          patch.object(hook, "_acquire_lock_ctx", _fake_lock_ctx()), \
-         patch.object(hook, "_fetch_my_issue", return_value=(1, parsed, existing)), \
+         patch.object(hook, "_fetch_my_issue", return_value=(1, parsed, existing, False)), \
          patch.object(hook, "_fetch_others", return_value=[]), \
          patch.object(hook, "_write_body", return_value=True), \
          patch("pre_tool_use.gitops.working_tree_paths", return_value=set()), \
@@ -284,7 +284,7 @@ def test_pre_tool_use_emits_conflict_with_path_hash_only(tmp_path, capsys):
          patch.object(hook, "_gh_auth_ok", return_value=True), \
          patch.object(hook, "_load_config", return_value=_cfg(mode="advisory")), \
          patch.object(hook, "_acquire_lock_ctx", _fake_lock_ctx()), \
-         patch.object(hook, "_fetch_my_issue", return_value=(1, parsed, existing)), \
+         patch.object(hook, "_fetch_my_issue", return_value=(1, parsed, existing, False)), \
          patch.object(hook, "_fetch_others", return_value=[
              {"path": target_relpath, "owners": [{"login": "alice", "branch": "a",
                                                   "declared_at": "2026-04-14T10:44:17Z",
@@ -318,7 +318,7 @@ def test_pretooluse_lazy_creates_issue_on_first_declare(tmp_path):
     labels = []
 
     def fake_fetch(login, label):
-        return (None, None, "")  # triggers create path
+        return (None, None, "", False)  # triggers create path
 
     def fake_create(login, label):
         return 77
@@ -362,7 +362,7 @@ def test_pretooluse_lazy_create_fails_returns_zero(tmp_path, capsys):
     labels = []
 
     def fake_fetch(login, label):
-        return (None, None, "")
+        return (None, None, "", False)
 
     with patch.object(hook, "_project_dir", return_value=tmp_path), \
          patch.object(hook, "_is_gitignored", return_value=False), \
@@ -442,3 +442,72 @@ def test_find_my_session_returns_none_when_no_entry_for_wb():
     ctx = SimpleNamespace(worktree_path="/wt", branch="main",
                           claude_session_id="ccs-NEW")
     assert hook._find_my_session(parsed, hook_session_id="ccs-NEW", ctx=ctx) is None
+
+
+def test_pretooluse_reopens_closed_issue_on_first_declare(tmp_path):
+    """v0.3.27: if list_my_status_issues returns an issue in CLOSED state
+    (typical after Actions release workflow closed it), PreToolUse must
+    reopen it and re-attach the active label before writing a fresh
+    session entry. Otherwise the issue stays closed / invisible."""
+    import state as state_mod
+    parsed = state_mod.State(updated_at="", sessions=[])
+    existing = ""
+
+    payload = _hook_input(file_path=str(tmp_path / "new.py"))
+
+    reopen_calls = []
+    label_calls = []
+
+    def fake_fetch(login, label):
+        return (77, parsed, existing, True)  # was_closed=True
+
+    with patch.object(hook, "_project_dir", return_value=tmp_path), \
+         patch.object(hook, "_is_gitignored", return_value=False), \
+         patch.object(hook, "_gh_auth_ok", return_value=True), \
+         patch.object(hook, "_load_config", return_value=_cfg()), \
+         patch.object(hook, "_acquire_lock_ctx", _fake_lock_ctx()), \
+         patch.object(hook, "_fetch_my_issue", side_effect=fake_fetch), \
+         patch.object(hook, "_fetch_others", return_value=[]), \
+         patch.object(hook, "_write_body", return_value=True), \
+         patch("pre_tool_use.github.reopen_issue",
+               side_effect=lambda n: reopen_calls.append(n) or True), \
+         patch("pre_tool_use.github.add_label",
+               side_effect=lambda n, lbl: label_calls.append((n, lbl))), \
+         patch("pre_tool_use.gitops.working_tree_paths", return_value=set()), \
+         patch("pre_tool_use.ctx_mod.build_context",
+               return_value=_make_ctx(str(tmp_path), "main")):
+        rc = hook.run(stdin_text=payload)
+
+    assert rc == 0
+    assert reopen_calls == [77]
+    assert label_calls == [(77, "yoink:active")]
+
+
+def test_pretooluse_does_not_reopen_open_issue(tmp_path):
+    import state as state_mod
+    parsed = state_mod.State(updated_at="", sessions=[])
+    existing = ""
+
+    payload = _hook_input(file_path=str(tmp_path / "new.py"))
+    reopen_calls = []
+
+    def fake_fetch(login, label):
+        return (77, parsed, existing, False)  # was_closed=False
+
+    with patch.object(hook, "_project_dir", return_value=tmp_path), \
+         patch.object(hook, "_is_gitignored", return_value=False), \
+         patch.object(hook, "_gh_auth_ok", return_value=True), \
+         patch.object(hook, "_load_config", return_value=_cfg()), \
+         patch.object(hook, "_acquire_lock_ctx", _fake_lock_ctx()), \
+         patch.object(hook, "_fetch_my_issue", side_effect=fake_fetch), \
+         patch.object(hook, "_fetch_others", return_value=[]), \
+         patch.object(hook, "_write_body", return_value=True), \
+         patch("pre_tool_use.github.reopen_issue",
+               side_effect=lambda n: reopen_calls.append(n) or True), \
+         patch("pre_tool_use.github.add_label"), \
+         patch("pre_tool_use.gitops.working_tree_paths", return_value=set()), \
+         patch("pre_tool_use.ctx_mod.build_context",
+               return_value=_make_ctx(str(tmp_path), "main")):
+        rc = hook.run(stdin_text=payload)
+    assert rc == 0
+    assert reopen_calls == []

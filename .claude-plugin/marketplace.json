@@ -17,7 +17,7 @@
       "name": "yoink-coordination",
       "source": "./plugins/yoink-coordination",
       "description": "Single-repo team coordination for Claude Code sessions",
-      "version": "0.3.26"
+      "version": "0.3.27"
     }
   ]
 }

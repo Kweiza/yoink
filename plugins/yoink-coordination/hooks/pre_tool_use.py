@@ -108,15 +108,21 @@ def _acquire_lock_ctx(path: Path, timeout: int):
 
 
 def _fetch_my_issue(login: str, label_status: str):
-    """Return (issue_number, parsed_state, existing_body) or (None, State, '')."""
+    """Return (issue_number, parsed_state, existing_body, was_closed).
+
+    `list_my_status_issues` is state=all, so closed issues come back too.
+    Callers use `was_closed` to decide whether to reopen the issue and
+    re-attach the active label before writing a fresh entry into it.
+    """
     issues = github.list_my_status_issues(login, label_status)
     if not issues:
-        return None, state_mod.State(updated_at=""), ""
+        return None, state_mod.State(updated_at=""), "", False
     issues.sort(key=lambda i: i["number"])
     primary = issues[0]
     body = primary.get("body", "")
     parsed, _corrupt = state_mod.parse_body(body)
-    return primary["number"], parsed, body
+    was_closed = (primary.get("state") or "").upper() == "CLOSED"
+    return primary["number"], parsed, body, was_closed
 
 
 def _fetch_others(login: str, label_status: str):
@@ -233,7 +239,9 @@ def run(stdin_text: Optional[str] = None) -> int:
             with _acquire_lock_ctx(_lock_path(ctx.login, ctx.repo_name_with_owner),
                                    timeout=cfg.lock_timeout_seconds):
                 # 6. Fetch my issue (create lazily on first declare — v0.3.10)
-                num, parsed, existing = _fetch_my_issue(ctx.login, label_status)
+                num, parsed, existing, was_closed = _fetch_my_issue(
+                    ctx.login, label_status,
+                )
                 issue_created = False
                 if num is None:
                     num = github.create_status_issue(ctx.login, label_status)
@@ -244,6 +252,15 @@ def run(stdin_text: Optional[str] = None) -> int:
                     existing = ""
                     issue_created = True
                     telemetry.emit("pre_tool_use", "issue_create")
+                elif was_closed:
+                    # v0.3.27: a closed issue (typically closed by the
+                    # release Action after last declared_file merged)
+                    # must be reopened before we add a new session entry.
+                    # Otherwise the entry is written but the issue stays
+                    # closed and invisible to /yoink-coordination:team-status.
+                    if github.reopen_issue(num):
+                        telemetry.emit("pre_tool_use", "issue_reopen")
+                        issue_created = True  # also triggers active-label re-attach below
                 me = _find_my_session(parsed, hook_session_id, ctx)
                 reconciled = False
                 cur_ccs = hook_session_id or ctx.claude_session_id
