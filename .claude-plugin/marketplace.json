@@ -1,0 +1,23 @@
+{
+  "name": "yoink",
+  "owner": {
+    "name": "kweiza"
+  },
+  "metadata": {
+    "description": "Team coordination marketplace for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "yoink-conventions",
+      "source": "./plugins/yoink-conventions",
+      "description": "Shared team conventions (Phase 1 empty shell)",
+      "version": "0.1.1"
+    },
+    {
+      "name": "yoink-coordination",
+      "source": "./plugins/yoink-coordination",
+      "description": "Single-repo team coordination for Claude Code sessions",
+      "version": "0.3.2"
+    }
+  ]
+}

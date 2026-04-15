@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""yoink-bootstrap: create the three opt-in labels in the current repo."""
+from __future__ import annotations
+import subprocess
+import sys
+from pathlib import Path
+
+TEAM_STATUS = Path(__file__).resolve().with_name("team-status")
+
+def main() -> int:
+    return subprocess.call([str(TEAM_STATUS), "init"])
+
+if __name__ == "__main__":
+    sys.exit(main())

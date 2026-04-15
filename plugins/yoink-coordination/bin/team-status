@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""team-status CLI. Reusable from /team-status slash command via --markdown."""
+from __future__ import annotations
+import argparse
+import sys
+from pathlib import Path
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
+
+import constants, github, context as ctx_mod, config as cfg_mod, state as state_mod, render  # noqa: E402
+
+def _label(prefix, suffix): return f"{prefix}:{suffix}"
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--markdown", action="store_true", help="Output Markdown (for slash command)")
+    ap.add_argument("--repo", help="owner/name override")
+    sub = ap.add_subparsers(dest="command")
+    sub.add_parser("init", help="Create yoink labels in this repo")
+    args = ap.parse_args()
+
+    if args.command == "init":
+        return _init_labels()
+
+    if not github.gh_auth_ok():
+        print("gh not authenticated; run `gh auth login`.", file=sys.stderr); return 2
+
+    repo = args.repo or ctx_mod.detect_repo()
+    if not repo:
+        print("could not detect repo; use --repo owner/name.", file=sys.stderr); return 2
+    worktree = ctx_mod.detect_worktree() or str(Path.cwd())
+    cfg, _ = cfg_mod.load_config(Path(worktree))
+    label = _label(cfg.label_prefix, constants.LABEL_SUFFIX_STATUS)
+
+    # Collect all status issues (mine + others). Two queries because gh has no
+    # "assignee: any" filter — list_other excludes current login, list_my includes only self.
+    my_login = ctx_mod.detect_login() or ""
+    mine = github.list_my_status_issues(my_login, label) if my_login else []
+    others = github.list_other_status_issues_open("__never_a_real_login__", label)
+    seen = {}
+    for iss in mine + others:
+        seen[iss["number"]] = iss
+
+    members = []
+    for iss in seen.values():
+        if iss.get("state") != "OPEN":
+            continue
+        assignees = iss.get("assignees") or []
+        if not assignees:
+            continue
+        login = assignees[0]["login"]
+        parsed, corrupt = state_mod.parse_body(iss.get("body", ""))
+        members.append({"login": login, "state": None if corrupt else parsed, "issue_number": iss["number"]})
+    members.sort(key=lambda m: m["login"])
+
+    now_iso = ctx_mod.now_utc_iso()
+    if args.markdown:
+        print(render.team_status_markdown(
+            members,
+            stale_threshold_seconds=cfg.stale_threshold_seconds,
+            now_iso=now_iso,
+        ))
+    else:
+        print(render.team_status_ansi(
+            members,
+            stale_threshold_seconds=cfg.stale_threshold_seconds,
+            now_iso=now_iso,
+        ))
+    return 0
+
+def _init_labels() -> int:
+    cfg, _ = cfg_mod.load_config(Path.cwd())
+    for suffix, color, desc in [
+        (constants.LABEL_SUFFIX_STATUS, "0e8a16", "yoink coordination status"),
+        (constants.LABEL_SUFFIX_ACTIVE, "5319e7", "yoink session(s) active"),
+        (constants.LABEL_SUFFIX_STALE,  "b60205", "yoink session stale (cleanup pending)"),
+    ]:
+        name = _label(cfg.label_prefix, suffix)
+        if github.label_exists(name):
+            print(f"[yoink] label {name}: ok (exists)")
+            continue
+        if github.create_label(name, color=color, description=desc):
+            print(f"[yoink] label {name}: created")
+        else:
+            print(f"[yoink] label {name}: failed (admin required?)", file=sys.stderr)
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
