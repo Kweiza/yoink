@@ -28,6 +28,7 @@ import context as ctx_mod   # noqa: E402
 import github               # noqa: E402
 import state as state_mod   # noqa: E402
 import telemetry            # noqa: E402
+import task_cache           # noqa: E402
 
 
 def _label(prefix: str, suffix: str) -> str:
@@ -67,11 +68,14 @@ def _task_set_for_current_session(ctx, cfg, hook_session_id: Optional[str]) -> b
 
 
 _REMINDER = (
-    "[yoink] Your current session has no task goal recorded.\n"
-    "Before or after handling this request, briefly summarize your goal "
-    "(1~2 sentences) by invoking:\n"
-    "    /yoink-coordination:task \"<summary>\"\n"
-    "Teammates see this summary in the yoink:status issue body."
+    "[yoink] SYSTEM INSTRUCTION — this session has declared files but no "
+    "task_summary recorded.\n"
+    "BEFORE replying to the user's request below, you MUST invoke the "
+    "slash command as your first action:\n"
+    "    /yoink-coordination:task \"<1~2 sentence summary of your goal>\"\n"
+    "Teammates see this summary in the yoink:status issue and rely on it "
+    "to understand what you're doing in parallel. Skipping this step "
+    "breaks coordination."
 )
 
 
@@ -84,18 +88,30 @@ def run(stdin_text: Optional[str] = None) -> int:
             return 0
         hook_session_id = payload.get("session_id")
         project_dir = _project_dir()
-        if project_dir is None or not github.gh_auth_ok():
+        if project_dir is None:
             return 0
+        # v0.3.11 fast path: if a stamp file for this worktree+branch exists
+        # we know task_summary was set (via CLI) — skip the gh round-trip
+        # entirely. This trims ~1.5~2s off every user turn in a session
+        # that has already recorded its task.
         ctx = ctx_mod.build_context()
         if ctx is None:
             return 0
+        if task_cache.is_set(ctx.worktree_path, ctx.branch):
+            return 0
+        if not github.gh_auth_ok():
+            return 0
         cfg, _ = cfg_mod.load_config(project_dir)
         try:
-            if not _task_set_for_current_session(ctx, cfg, hook_session_id):
-                # stdout from UserPromptSubmit is prepended to Claude's
-                # user-turn context. This makes the reminder persistent
-                # until the task is recorded.
-                print(_REMINDER)
+            if _task_set_for_current_session(ctx, cfg, hook_session_id):
+                # Live check said task is set — persist to cache so next
+                # prompts go through the fast path.
+                task_cache.mark_set(ctx.worktree_path, ctx.branch)
+                return 0
+            # stdout from UserPromptSubmit is prepended to Claude's
+            # user-turn context. This makes the reminder persistent
+            # until the task is recorded.
+            print(_REMINDER)
         except Exception as e:
             print(f"[yoink] UserPromptSubmit reminder failed: {e}",
                   file=sys.stderr)

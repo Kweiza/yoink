@@ -23,7 +23,7 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
-import constants, github, context as ctx_mod, config as cfg_mod, state as state_mod, lock  # noqa: E402
+import constants, github, context as ctx_mod, config as cfg_mod, state as state_mod, lock, task_cache  # noqa: E402
 
 
 def _label(prefix: str, suffix: str) -> str:
@@ -92,6 +92,9 @@ def main(argv: list[str]) -> int:
                 parsed, login=ctx.login, preserve_tail_from=existing,
             )
             if github.edit_issue_body(num, new_body):
+                # v0.3.11: stamp local cache so UserPromptSubmit hook can
+                # skip the gh round-trip on subsequent prompts.
+                task_cache.mark_set(ctx.worktree_path, ctx.branch)
                 print(f"[yoink] task recorded: {summary}")
                 return 0
             print("[yoink] failed to update issue body.", file=sys.stderr)

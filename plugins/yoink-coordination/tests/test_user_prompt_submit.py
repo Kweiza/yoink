@@ -122,3 +122,64 @@ def test_reminder_suppressed_when_task_summary_set(capsys, monkeypatch, tmp_path
 
     captured = capsys.readouterr()
     assert "/yoink-coordination:task" not in captured.out
+
+
+# ---------------------------------------------------------------
+# v0.3.11 cache fast path
+# ---------------------------------------------------------------
+def test_upsubmit_cache_hit_skips_gh_and_no_reminder(tmp_path, monkeypatch, capsys):
+    """When the task_cache stamp exists for this worktree+branch, the hook
+    must early-return without calling gh and without printing a reminder."""
+    import importlib, sys as _sys
+    from pathlib import Path as _Path
+    hooks = _Path(__file__).resolve().parents[1] / "hooks"
+    if str(hooks) not in _sys.path:
+        _sys.path.insert(0, str(hooks))
+    import user_prompt_submit as hook
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    monkeypatch.setenv("YOINK_TASK_CACHE_ROOT", str(tmp_path / "cache"))
+    importlib.reload(hook.task_cache)
+
+    from types import SimpleNamespace
+    fake_ctx = SimpleNamespace(
+        login="alice", repo_name_with_owner="o/r",
+        worktree_path="/wt", branch="feat/x",
+        session_id="s", claude_session_id="ccs",
+        task_issue=None, started_at="2026-04-15T10:00:00Z",
+    )
+    monkeypatch.setattr(hook.ctx_mod, "build_context", lambda: fake_ctx)
+
+    # Pre-create the stamp file to simulate a prior CLI run.
+    hook.task_cache.mark_set("/wt", "feat/x")
+
+    gh_called = {"n": 0}
+    def spy(*a, **k):
+        gh_called["n"] += 1
+        return []
+    monkeypatch.setattr(hook.github, "list_my_status_issues", spy)
+    monkeypatch.setattr(hook.github, "gh_auth_ok", lambda: True)
+
+    payload = '{"session_id":"s"}'
+    rc = hook.run(stdin_text=payload)
+    out = capsys.readouterr()
+    assert rc == 0
+    assert gh_called["n"] == 0, "gh round-trip must be skipped on cache hit"
+    assert "SYSTEM INSTRUCTION" not in out.out
+    assert "SYSTEM INSTRUCTION" not in out.err
+
+
+def test_upsubmit_stronger_reminder_language():
+    """The reminder text must be imperative ('MUST', 'BEFORE', first
+    action framing) so Claude interprets it as instruction, not trivia."""
+    import importlib, sys as _sys
+    from pathlib import Path as _Path
+    hooks = _Path(__file__).resolve().parents[1] / "hooks"
+    if str(hooks) not in _sys.path:
+        _sys.path.insert(0, str(hooks))
+    import user_prompt_submit as hook
+    importlib.reload(hook)
+    r = hook._REMINDER
+    assert "MUST" in r
+    assert "BEFORE" in r
+    assert "/yoink-coordination:task" in r
