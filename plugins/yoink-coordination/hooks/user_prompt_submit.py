@@ -66,14 +66,27 @@ def _evaluate_task_state(ctx, cfg, hook_session_id: Optional[str]) -> str:
     issues.sort(key=lambda i: i["number"])
     body = issues[0].get("body", "") or ""
     parsed, _ = state_mod.parse_body(body)
-    # v0.3.15: single entry per (worktree, branch), shared across sessions
-    # that work on the same task. claude_session_id is metadata only.
+    # v0.3.18: per-session entry — match by claude_session_id strictly.
+    sid = hook_session_id or ctx.claude_session_id
     matched_session = None
-    for s in parsed.sessions:
-        if (s.worktree_path == ctx.worktree_path
-                and s.branch == ctx.branch):
-            matched_session = s
-            break
+    if sid:
+        for s in parsed.sessions:
+            if s.claude_session_id == sid:
+                matched_session = s
+                break
+        if matched_session is None:
+            for s in parsed.sessions:
+                if (not s.claude_session_id
+                        and s.worktree_path == ctx.worktree_path
+                        and s.branch == ctx.branch):
+                    matched_session = s
+                    break
+    else:
+        for s in parsed.sessions:
+            if (s.worktree_path == ctx.worktree_path
+                    and s.branch == ctx.branch):
+                matched_session = s
+                break
     if matched_session is None:
         return _STATE_NO_ENTRY
     if (matched_session.task_summary or "").strip():
@@ -112,7 +125,8 @@ def run(stdin_text: Optional[str] = None) -> int:
         ctx = ctx_mod.build_context()
         if ctx is None:
             return 0
-        if task_cache.is_set(ctx.worktree_path, ctx.branch):
+        ccs = hook_session_id or ctx.claude_session_id or ""
+        if task_cache.is_set(ctx.worktree_path, ctx.branch, ccs):
             return 0
         if not github.gh_auth_ok():
             return 0
@@ -120,7 +134,7 @@ def run(stdin_text: Optional[str] = None) -> int:
         try:
             state = _evaluate_task_state(ctx, cfg, hook_session_id)
             if state == _STATE_SET:
-                task_cache.mark_set(ctx.worktree_path, ctx.branch)
+                task_cache.mark_set(ctx.worktree_path, ctx.branch, ccs)
                 return 0
             if state in (_STATE_EMPTY, _STATE_NO_ENTRY):
                 # v0.3.16: also nag when no entry exists yet. The previous

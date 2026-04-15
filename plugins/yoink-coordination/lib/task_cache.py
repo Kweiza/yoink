@@ -30,35 +30,42 @@ def _root() -> Path:
     return Path.home() / ".claude" / "cache" / "yoink" / "task-set"
 
 
-def _key(worktree_path: str, branch: str) -> str:
-    raw = f"{worktree_path}::{branch}".encode("utf-8")
+def _key(worktree_path: str, branch: str, claude_session_id: str = "") -> str:
+    """v0.3.18: stamp is per Claude session. New sessions on the same
+    (worktree, branch) get their own key so the reminder fires fresh.
+    `claude_session_id` may be empty for legacy callers — falls back to
+    the (worktree, branch)-only key for backward compatibility."""
+    if claude_session_id:
+        raw = f"{worktree_path}::{branch}::{claude_session_id}".encode("utf-8")
+    else:
+        raw = f"{worktree_path}::{branch}".encode("utf-8")
     return hashlib.sha1(raw).hexdigest()[:16]
 
 
-def stamp_path(worktree_path: str, branch: str) -> Path:
-    return _root() / f"{_key(worktree_path, branch)}.stamp"
+def stamp_path(worktree_path: str, branch: str, claude_session_id: str = "") -> Path:
+    return _root() / f"{_key(worktree_path, branch, claude_session_id)}.stamp"
 
 
-def is_set(worktree_path: str, branch: str) -> bool:
+def is_set(worktree_path: str, branch: str, claude_session_id: str = "") -> bool:
     try:
-        return stamp_path(worktree_path, branch).exists()
+        return stamp_path(worktree_path, branch, claude_session_id).exists()
     except OSError:
         return False
 
 
-def mark_set(worktree_path: str, branch: str) -> None:
-    p = stamp_path(worktree_path, branch)
+def mark_set(worktree_path: str, branch: str, claude_session_id: str = "") -> None:
+    p = stamp_path(worktree_path, branch, claude_session_id)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.touch()
     except OSError:
-        pass  # fail-silent: cache is best-effort
+        pass
 
 
-def clear(worktree_path: str, branch: str) -> bool:
-    """Remove the stamp for (worktree, branch). Returns True iff a stamp
-    actually existed and was removed. Fail-silent on OSError."""
-    p = stamp_path(worktree_path, branch)
+def clear(worktree_path: str, branch: str, claude_session_id: str = "") -> bool:
+    """Remove the stamp for this (worktree, branch[, ccs]). Returns True
+    iff a stamp actually existed and was removed."""
+    p = stamp_path(worktree_path, branch, claude_session_id)
     try:
         if p.exists():
             p.unlink()

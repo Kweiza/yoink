@@ -150,8 +150,8 @@ def test_upsubmit_cache_hit_skips_gh_and_no_reminder(tmp_path, monkeypatch, caps
     )
     monkeypatch.setattr(hook.ctx_mod, "build_context", lambda: fake_ctx)
 
-    # Pre-create the stamp file to simulate a prior CLI run.
-    hook.task_cache.mark_set("/wt", "feat/x")
+    # Pre-create the stamp file to simulate a prior CLI run for this ccs.
+    hook.task_cache.mark_set("/wt", "feat/x", "s")
 
     gh_called = {"n": 0}
     def spy(*a, **k):
@@ -227,10 +227,9 @@ def test_upsubmit_does_not_inherit_other_session_task(tmp_path, monkeypatch):
         lambda l, lab: [{"number": 1, "body": body,
                           "assignees": [{"login": "alice"}]}],
     )
-    # v0.3.15: matching is by (worktree, branch) so a new session reads
-    # the persistent task_summary from the inherited entry. Old session
-    # id and new session id both map to _STATE_SET.
-    assert hook._evaluate_task_state(ctx, cfg, "ccs-NEW") == hook._STATE_SET
+    # v0.3.18: per-session matching by ccs. ccs-NEW has no entry → NO_ENTRY
+    # (won't inherit ccs-OLD's task). ccs-OLD's own entry is set.
+    assert hook._evaluate_task_state(ctx, cfg, "ccs-NEW") == hook._STATE_NO_ENTRY
     assert hook._evaluate_task_state(ctx, cfg, "ccs-OLD") == hook._STATE_SET
 
 

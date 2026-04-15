@@ -171,13 +171,27 @@ def run(stdin_text: Optional[str] = None) -> int:
                 changed = False
                 entry_emptied = False
                 now = ctx_mod.now_utc_iso()
-                # v0.3.15: single entry per (worktree, branch) — no ccs match.
+                # v0.3.18: per-session entry — match by claude_session_id.
+                sid = hook_session_id or ctx.claude_session_id
                 target_idx = None
-                for i, s in enumerate(parsed.sessions):
-                    if (s.worktree_path == ctx.worktree_path
-                            and s.branch == ctx.branch):
-                        target_idx = i
-                        break
+                if sid:
+                    for i, s in enumerate(parsed.sessions):
+                        if s.claude_session_id == sid:
+                            target_idx = i
+                            break
+                    if target_idx is None:
+                        for i, s in enumerate(parsed.sessions):
+                            if (not s.claude_session_id
+                                    and s.worktree_path == ctx.worktree_path
+                                    and s.branch == ctx.branch):
+                                target_idx = i
+                                break
+                else:
+                    for i, s in enumerate(parsed.sessions):
+                        if (s.worktree_path == ctx.worktree_path
+                                and s.branch == ctx.branch):
+                            target_idx = i
+                            break
                 if target_idx is not None:
                     s = parsed.sessions[target_idx]
                     kept, released = _release_merged(
@@ -209,10 +223,10 @@ def run(stdin_text: Optional[str] = None) -> int:
                     )
                     github.edit_issue_body(num, new_body)
                     if entry_emptied:
-                        # Stamp belongs to this (worktree, branch) entry —
-                        # entry gone, stamp must go too so the next task
-                        # at this location starts with a fresh reminder.
-                        task_cache.clear(ctx.worktree_path, ctx.branch)
+                        # Stamp belongs to this session's entry — entry
+                        # gone, stamp must go too.
+                        ccs = sid or ""
+                        task_cache.clear(ctx.worktree_path, ctx.branch, ccs)
                         if not parsed.sessions:
                             label_active = _label(
                                 cfg.label_prefix, constants.LABEL_SUFFIX_ACTIVE,

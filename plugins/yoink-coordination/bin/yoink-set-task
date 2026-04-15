@@ -156,13 +156,14 @@ def main(argv):
                 existing = issue.get("body", "")
                 parsed, _ = state_mod.parse_body(existing)
 
-            # (worktree, branch) entry — lazy-create.
+            # v0.3.18: per-session entry — match by claude_session_id.
+            ccs = ctx.claude_session_id or ""
             target = None
-            for s in parsed.sessions:
-                if (s.worktree_path == ctx.worktree_path
-                        and s.branch == ctx.branch):
-                    target = s
-                    break
+            if ccs:
+                for s in parsed.sessions:
+                    if s.claude_session_id == ccs:
+                        target = s
+                        break
             if target is None:
                 target = state_mod.Session(
                     session_id=ctx.session_id,
@@ -217,7 +218,7 @@ def main(argv):
                 parsed, login=ctx.login, preserve_tail_from=existing,
             )
             if github.edit_issue_body(num, new_body):
-                task_cache.mark_set(ctx.worktree_path, ctx.branch)
+                task_cache.mark_set(ctx.worktree_path, ctx.branch, ccs)
                 files_note = (
                     f" ({len(normalized)} file(s) declared)" if normalized else ""
                 )

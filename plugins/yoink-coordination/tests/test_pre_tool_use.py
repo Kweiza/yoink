@@ -391,10 +391,11 @@ def test_pretooluse_lazy_create_fails_returns_zero(tmp_path, capsys):
 # A session entry survives across Claude sessions until all its
 # declared_files land on primary (release happens in stop.py only).
 # ---------------------------------------------------------------
-def test_find_my_session_inherits_entry_across_sessions_by_wb():
-    """A new Claude session with a different ccs MUST inherit an existing
-    entry on the same (worktree, branch) — that's how task_summary and
-    declared_files persist across session boundaries until merged."""
+def test_find_my_session_does_not_inherit_other_session_entry():
+    """v0.3.18: per-session entries. A new Claude session must NOT
+    inherit another session's entry, even on the same (worktree, branch).
+    The new session creates its own entry; the old session's entry
+    persists separately until its own files merge to primary."""
     import state as state_mod
     prior = state_mod.Session(
         session_id="old", worktree_path="/wt", branch="main",
@@ -411,7 +412,27 @@ def test_find_my_session_inherits_entry_across_sessions_by_wb():
     ctx = SimpleNamespace(worktree_path="/wt", branch="main",
                           claude_session_id="ccs-NEW")
     out = hook._find_my_session(parsed, hook_session_id="ccs-NEW", ctx=ctx)
-    assert out is prior
+    assert out is None
+
+
+def test_find_my_session_falls_back_to_legacy_no_ccs_entry():
+    """Legacy entry (no claude_session_id) on the same (worktree, branch)
+    is matched as a one-off compatibility path."""
+    import state as state_mod
+    legacy = state_mod.Session(
+        session_id="legacy", worktree_path="/wt", branch="main",
+        task_issue=None,
+        started_at="2026-04-15T10:00:00Z",
+        last_heartbeat="2026-04-15T10:00:00Z",
+        declared_files=[],
+        driven_by="claude-code",
+        claude_session_id=None,
+    )
+    parsed = state_mod.State(updated_at="", sessions=[legacy])
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(worktree_path="/wt", branch="main",
+                          claude_session_id="ccs-NEW")
+    assert hook._find_my_session(parsed, hook_session_id="ccs-NEW", ctx=ctx) is legacy
 
 
 def test_find_my_session_returns_none_when_no_entry_for_wb():

@@ -156,12 +156,27 @@ def _write_body(issue_num: int, login: str, state, existing_body: str) -> bool:
 
 
 def _find_my_session(parsed_state, hook_session_id, ctx):
-    """v0.3.15: a task entry is per (worktree, branch) and persists until
-    all its declared_files are merged to the primary branch. Sessions are
-    visitors — claude_session_id is recorded for "last writer" visibility
-    but is NOT a match key. New sessions on the same (worktree, branch)
-    inherit the existing entry (and its declared_files + task_summary).
+    """v0.3.18: each Claude session has its own entry (matched by
+    claude_session_id). Past sessions on the same (worktree, branch)
+    keep their entries until their own declared_files merge to primary
+    (stop.py releases). A new session NEVER inherits another session's
+    entry — it creates its own.
+
+    Legacy entries (no claude_session_id, e.g. pre-v0.3.10 data) fall
+    back to (worktree, branch) match for one-off compatibility.
     """
+    sid = hook_session_id or ctx.claude_session_id
+    if sid:
+        for s in parsed_state.sessions:
+            if s.claude_session_id == sid:
+                return s
+        for s in parsed_state.sessions:
+            if (not s.claude_session_id
+                    and s.worktree_path == ctx.worktree_path
+                    and s.branch == ctx.branch):
+                return s
+        return None
+    # No session_id at all (legacy CC) — pure (worktree, branch) fallback.
     for s in parsed_state.sessions:
         if s.worktree_path == ctx.worktree_path and s.branch == ctx.branch:
             return s
