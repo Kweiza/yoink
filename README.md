@@ -21,10 +21,6 @@ same file.
 Run `/yoink-coordination:team-status` to see current activity across
 teammates.
 
-## Version
-
-0.3.2
-
 ## License
 
 MIT
