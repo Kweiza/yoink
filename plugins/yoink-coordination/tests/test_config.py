@@ -125,3 +125,28 @@ def test_non_underscore_unknown_key_still_warns(tmp_path):
     )
     cfg, warnings = load_config(tmp_path)
     assert any("unknown key 'some_typo_key'" in w for w in warnings)
+
+
+def test_primary_branch_default_none(tmp_path):
+    cfg, _ = load_config(tmp_path)
+    assert cfg.primary_branch is None
+
+
+def test_primary_branch_from_config(tmp_path):
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "yoink.config.json").write_text(
+        json.dumps({"primary_branch": "trunk"})
+    )
+    cfg, warnings = load_config(tmp_path)
+    assert cfg.primary_branch == "trunk"
+    assert warnings == []
+
+
+def test_primary_branch_invalid_is_warned(tmp_path):
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "yoink.config.json").write_text(
+        json.dumps({"primary_branch": ""})
+    )
+    cfg, warnings = load_config(tmp_path)
+    assert cfg.primary_branch is None
+    assert any("primary_branch" in w for w in warnings)

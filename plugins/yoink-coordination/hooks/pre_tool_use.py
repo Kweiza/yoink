@@ -282,6 +282,14 @@ def run(stdin_text: Optional[str] = None) -> int:
                 now = ctx_mod.now_utc_iso()
                 new_declared, changed = claim.acquire(new_declared, norm, now=now)
                 me.declared_files = new_declared
+                if changed:
+                    # New path added to declared_files — emit lifecycle event.
+                    # Idempotent: if path was already there, claim.acquire
+                    # returns changed=False and we skip.
+                    telemetry.emit(
+                        "pre_tool_use", "acquire",
+                        path_hash=telemetry.path_hash(norm),
+                    )
                 cooldown_expired = _heartbeat_cooldown_expired(
                     me.last_heartbeat, now, cfg.heartbeat_cooldown_seconds,
                 )

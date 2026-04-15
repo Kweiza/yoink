@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import constants
 
 @dataclass
@@ -14,10 +14,14 @@ class Config:
     lock_timeout_seconds: int = constants.DEFAULT_LOCK_TIMEOUT_SECONDS
     heartbeat_cooldown_seconds: int = constants.DEFAULT_HEARTBEAT_COOLDOWN_SECONDS
     stale_threshold_seconds: int = constants.DEFAULT_STALE_THRESHOLD_SECONDS
+    # None => hook callers should fall back to gitops.detect_primary_branch()
+    # or the hard-coded default "main".
+    primary_branch: Optional[str] = None
 
 KNOWN_ROOT_KEYS = {
     "conflict_mode", "label_prefix", "lock_timeout_seconds",
     "heartbeat_cooldown_seconds", "stale_threshold_seconds",
+    "primary_branch",
 }
 
 def load_config(repo_root: Path) -> Tuple[Config, List[str]]:
@@ -72,5 +76,14 @@ def load_config(repo_root: Path) -> Tuple[Config, List[str]]:
             cfg.stale_threshold_seconds = v
         else:
             warnings.append(f"config: stale_threshold_seconds '{v}' out of range [60,86400]; using default")
+
+    if "primary_branch" in raw:
+        v = raw["primary_branch"]
+        # Git refname rules are strict; we enforce only the loose subset users
+        # actually care about: non-empty string of safe characters.
+        if isinstance(v, str) and v and re.match(r"^[A-Za-z0-9._/\-]+$", v):
+            cfg.primary_branch = v
+        else:
+            warnings.append(f"config: primary_branch '{v}' invalid; using auto-detect")
 
     return cfg, warnings

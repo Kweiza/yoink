@@ -123,9 +123,94 @@ def test_working_tree_paths_includes_both_sides_of_rename(tmp_path):
     (repo / "old.txt").write_text("content")
     _git(repo, "add", "old.txt"); _git(repo, "commit", "-qm", "i")
     _git(repo, "mv", "old.txt", "new.txt")
-    # `git mv` stages the rename. porcelain will show `R  old.txt\0new.txt` (or similar).
     paths = gitops.working_tree_paths(repo)
-    # Both the new name AND the old name must appear, per spec requirement that
-    # rename old-name is parsed into the set.
     assert "new.txt" in paths
     assert "old.txt" in paths
+
+
+# ------------------------------------------------------------------
+# Phase 5 v0.3.7: primary branch detection + merge-ahead check
+# ------------------------------------------------------------------
+
+
+def test_detect_primary_branch_returns_origin_head(tmp_path):
+    """When origin/HEAD is a symbolic ref to origin/main, detect returns 'main'."""
+    upstream = _init_repo(tmp_path / "up")
+    (upstream / "seed.txt").write_text("seed")
+    _git(upstream, "add", "seed.txt"); _git(upstream, "commit", "-qm", "init")
+    # Rename default branch to 'main' to exercise the path
+    _git(upstream, "branch", "-m", "main")
+
+    repo = tmp_path / "r"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(repo)], check=True)
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+
+    assert gitops.detect_primary_branch(repo) == "main"
+
+
+def test_detect_primary_branch_returns_none_on_missing_symbolic_ref(tmp_path):
+    repo = _init_repo(tmp_path / "r")
+    (repo / "a.txt").write_text("a")
+    _git(repo, "add", "a.txt"); _git(repo, "commit", "-qm", "i")
+    # No origin remote → symbolic-ref fails
+    assert gitops.detect_primary_branch(repo) is None
+
+
+def test_detect_primary_branch_returns_none_on_non_repo(tmp_path):
+    assert gitops.detect_primary_branch(tmp_path / "nope") is None
+
+
+def test_path_ahead_of_primary_true_when_commit_touches_path(tmp_path):
+    """Clone with one 'ahead' local commit that modifies foo.py → True."""
+    upstream = _init_repo(tmp_path / "up")
+    (upstream / "foo.py").write_text("v1")
+    _git(upstream, "add", "foo.py"); _git(upstream, "commit", "-qm", "init")
+    _git(upstream, "branch", "-m", "main")
+
+    repo = tmp_path / "r"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(repo)], check=True)
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    (repo / "foo.py").write_text("v2")
+    _git(repo, "add", "foo.py"); _git(repo, "commit", "-qm", "edit foo")
+
+    assert gitops.path_ahead_of_primary(repo, "main", "foo.py") is True
+
+
+def test_path_ahead_of_primary_false_when_path_merged(tmp_path):
+    """HEAD == origin/main → no ahead commits → False for any path."""
+    upstream = _init_repo(tmp_path / "up")
+    (upstream / "foo.py").write_text("v1")
+    _git(upstream, "add", "foo.py"); _git(upstream, "commit", "-qm", "init")
+    _git(upstream, "branch", "-m", "main")
+
+    repo = tmp_path / "r"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(repo)], check=True)
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+
+    assert gitops.path_ahead_of_primary(repo, "main", "foo.py") is False
+
+
+def test_path_ahead_of_primary_only_flags_the_path_that_differs(tmp_path):
+    """Commit ahead touches bar.py only → foo.py is NOT ahead (returns False)."""
+    upstream = _init_repo(tmp_path / "up")
+    (upstream / "foo.py").write_text("v1")
+    (upstream / "bar.py").write_text("v1")
+    _git(upstream, "add", "foo.py", "bar.py"); _git(upstream, "commit", "-qm", "init")
+    _git(upstream, "branch", "-m", "main")
+
+    repo = tmp_path / "r"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(repo)], check=True)
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    (repo / "bar.py").write_text("v2")
+    _git(repo, "add", "bar.py"); _git(repo, "commit", "-qm", "edit bar only")
+
+    assert gitops.path_ahead_of_primary(repo, "main", "bar.py") is True
+    assert gitops.path_ahead_of_primary(repo, "main", "foo.py") is False
+
+
+def test_path_ahead_of_primary_fail_open_on_missing_branch(tmp_path):
+    """If origin/<primary> doesn't exist, return False (fail-open = release)."""
+    repo = _init_repo(tmp_path / "r")
+    (repo / "a.txt").write_text("a")
+    _git(repo, "add", "a.txt"); _git(repo, "commit", "-qm", "i")
+    assert gitops.path_ahead_of_primary(repo, "main", "a.txt") is False

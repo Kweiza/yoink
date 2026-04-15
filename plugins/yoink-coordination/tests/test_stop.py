@@ -59,6 +59,7 @@ def test_stop_cooldown_expired_triggers_heartbeat_write(monkeypatch, tmp_path):
         conflict_mode="advisory", label_prefix="yoink",
         lock_timeout_seconds=10,
         heartbeat_cooldown_seconds=120, stale_threshold_seconds=900,
+        primary_branch=None,
     )
 
     writes = []
@@ -98,3 +99,130 @@ def test_stop_emits_latency_on_run(capsys, monkeypatch):
     latency = [p for p in parsed if p["metric"] == "latency"]
     assert len(latency) == 1
     assert latency[0]["hook"] == "stop"
+
+
+def test_stop_releases_merged_path_and_emits_release_metric(monkeypatch, tmp_path, capsys):
+    """Declared path not in working tree AND not ahead of primary → release,
+    `release` metric emitted with held_seconds + trigger=merged."""
+    import json as _json
+    import state as state_mod
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+    declared_at = "2026-04-15T00:00:00Z"
+    me = state_mod.Session(
+        session_id="s", worktree_path=str(tmp_path), branch="feat",
+        task_issue=None,
+        started_at="2026-04-15T00:00:00Z",
+        last_heartbeat="2026-04-15T06:59:00Z",
+        declared_files=[{"path": "merged.py", "declared_at": declared_at}],
+        driven_by="claude-code",
+        claude_session_id="s-abc",
+    )
+    parsed = state_mod.State(updated_at="", sessions=[me])
+    existing_body = state_mod.render_body(parsed, login="kweiza")
+
+    fake_ctx = SimpleNamespace(
+        login="kweiza", repo_name_with_owner="kweiza/yoink",
+        branch="feat", worktree_path=str(tmp_path),
+        session_id="s", claude_session_id="s-abc",
+        task_issue=None, started_at="2026-04-15T00:00:00Z",
+    )
+    fake_cfg = SimpleNamespace(
+        conflict_mode="advisory", label_prefix="yoink",
+        lock_timeout_seconds=10,
+        heartbeat_cooldown_seconds=120, stale_threshold_seconds=900,
+        primary_branch="main",
+    )
+
+    writes = []
+    from unittest.mock import patch as _patch
+    with _patch.object(stop.github, "gh_auth_ok", return_value=True), \
+         _patch.object(stop.ctx_mod, "build_context", return_value=fake_ctx), \
+         _patch.object(stop.cfg_mod, "load_config", return_value=(fake_cfg, [])), \
+         _patch.object(stop.github, "list_my_status_issues",
+                       return_value=[{"number": 1, "state": "OPEN", "body": existing_body,
+                                      "assignees": [{"login": "kweiza"}]}]), \
+         _patch.object(stop.github, "edit_issue_body",
+                       side_effect=lambda n, b: writes.append(b) or True), \
+         _patch.object(stop.gitops, "working_tree_paths", return_value=set()), \
+         _patch.object(stop.gitops, "path_ahead_of_primary", return_value=False), \
+         _patch.object(stop.lock, "acquire") as lock_mock:
+        lock_mock.return_value.__enter__ = lambda self: None
+        lock_mock.return_value.__exit__ = lambda self, *a: False
+
+        payload = _json.dumps({"hook_event_name": "Stop", "session_id": "s-abc"})
+        assert stop.run(stdin_text=payload) == 0
+
+    assert len(writes) == 1
+    body = writes[0]
+    assert '"declared_files": []' in body
+    err = capsys.readouterr().err
+    lines = [_json.loads(ln.split(" ", 1)[1]) for ln in err.splitlines()
+             if ln.startswith("[yoink-metric] ")]
+    releases = [l for l in lines if l["metric"] == "release"]
+    assert len(releases) == 1
+    assert releases[0]["hook"] == "stop"
+    assert releases[0]["trigger"] in ("merged", "reverted")
+    assert isinstance(releases[0]["held_seconds"], int)
+    assert releases[0]["held_seconds"] >= 0
+
+
+def test_stop_keeps_path_when_ahead_of_primary(monkeypatch, tmp_path, capsys):
+    """Path is not dirty but still has ahead-of-primary commits → held."""
+    import json as _json
+    import state as state_mod
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+    me = state_mod.Session(
+        session_id="s", worktree_path=str(tmp_path), branch="feat",
+        task_issue=None, started_at="2026-04-15T00:00:00Z",
+        last_heartbeat="2026-04-15T06:59:00Z",
+        declared_files=[{"path": "pending.py", "declared_at": "2026-04-15T00:00:00Z"}],
+        driven_by="claude-code",
+        claude_session_id="s-xyz",
+    )
+    parsed = state_mod.State(updated_at="", sessions=[me])
+    existing_body = state_mod.render_body(parsed, login="kweiza")
+
+    fake_ctx = SimpleNamespace(
+        login="kweiza", repo_name_with_owner="kweiza/yoink",
+        branch="feat", worktree_path=str(tmp_path),
+        session_id="s", claude_session_id="s-xyz",
+        task_issue=None, started_at="2026-04-15T00:00:00Z",
+    )
+    fake_cfg = SimpleNamespace(
+        conflict_mode="advisory", label_prefix="yoink",
+        lock_timeout_seconds=10,
+        heartbeat_cooldown_seconds=120, stale_threshold_seconds=900,
+        primary_branch="main",
+    )
+
+    writes = []
+    from unittest.mock import patch as _patch
+    with _patch.object(stop.github, "gh_auth_ok", return_value=True), \
+         _patch.object(stop.ctx_mod, "build_context", return_value=fake_ctx), \
+         _patch.object(stop.cfg_mod, "load_config", return_value=(fake_cfg, [])), \
+         _patch.object(stop.github, "list_my_status_issues",
+                       return_value=[{"number": 1, "state": "OPEN", "body": existing_body,
+                                      "assignees": [{"login": "kweiza"}]}]), \
+         _patch.object(stop.github, "edit_issue_body",
+                       side_effect=lambda n, b: writes.append(b) or True), \
+         _patch.object(stop.gitops, "working_tree_paths", return_value=set()), \
+         _patch.object(stop.gitops, "path_ahead_of_primary", return_value=True), \
+         _patch.object(stop.lock, "acquire") as lock_mock:
+        lock_mock.return_value.__enter__ = lambda self: None
+        lock_mock.return_value.__exit__ = lambda self, *a: False
+
+        payload = _json.dumps({"hook_event_name": "Stop", "session_id": "s-xyz"})
+        assert stop.run(stdin_text=payload) == 0
+
+    # Path kept (ahead of primary). No release metric.
+    err = capsys.readouterr().err
+    releases = [ln for ln in err.splitlines()
+                if ln.startswith("[yoink-metric] ") and '"metric":"release"' in ln
+                and '"metric":"release_applied"' not in ln]
+    assert releases == []

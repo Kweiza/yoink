@@ -70,7 +70,8 @@ def main() -> int:
     return 0
 
 def _init_labels() -> int:
-    cfg, _ = cfg_mod.load_config(Path.cwd())
+    cwd = Path.cwd()
+    cfg, _ = cfg_mod.load_config(cwd)
     for suffix, color, desc in [
         (constants.LABEL_SUFFIX_STATUS, "0e8a16", "yoink coordination status"),
         (constants.LABEL_SUFFIX_ACTIVE, "5319e7", "yoink session(s) active"),
@@ -84,6 +85,8 @@ def _init_labels() -> int:
             print(f"[yoink] label {name}: created")
         else:
             print(f"[yoink] label {name}: failed (admin required?)", file=sys.stderr)
+    import bootstrap
+    bootstrap.ensure_config_file(cwd)
     return 0
 
 if __name__ == "__main__":
