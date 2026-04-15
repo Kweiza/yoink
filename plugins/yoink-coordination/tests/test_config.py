@@ -127,26 +127,15 @@ def test_non_underscore_unknown_key_still_warns(tmp_path):
     assert any("unknown key 'some_typo_key'" in w for w in warnings)
 
 
-def test_primary_branch_default_none(tmp_path):
-    cfg, _ = load_config(tmp_path)
-    assert cfg.primary_branch is None
-
-
-def test_primary_branch_from_config(tmp_path):
+def test_legacy_primary_branch_key_is_silently_ignored(tmp_path):
+    """v0.3.26: `primary_branch` used to be a Config field. It's now a
+    recognized legacy key that load_config silently accepts (no unknown-
+    key warning) so existing yoink.config.json files upgrade cleanly."""
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude" / "yoink.config.json").write_text(
-        json.dumps({"primary_branch": "trunk"})
+        json.dumps({"primary_branch": "trunk", "conflict_mode": "advisory"})
     )
     cfg, warnings = load_config(tmp_path)
-    assert cfg.primary_branch == "trunk"
     assert warnings == []
-
-
-def test_primary_branch_invalid_is_warned(tmp_path):
-    (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude" / "yoink.config.json").write_text(
-        json.dumps({"primary_branch": ""})
-    )
-    cfg, warnings = load_config(tmp_path)
-    assert cfg.primary_branch is None
-    assert any("primary_branch" in w for w in warnings)
+    assert cfg.conflict_mode == "advisory"
+    assert not hasattr(cfg, "primary_branch")

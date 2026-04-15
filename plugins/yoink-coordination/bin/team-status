@@ -86,7 +86,6 @@ def _init_labels() -> int:
         else:
             print(f"[yoink] label {name}: failed (admin required?)", file=sys.stderr)
     import bootstrap
-    bootstrap.ensure_config_file(cwd)
     bootstrap.install_release_workflow(cwd)
     return 0
 

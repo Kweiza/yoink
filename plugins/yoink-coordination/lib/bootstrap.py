@@ -1,26 +1,26 @@
 """Bootstrap helpers for /yoink-coordination:bootstrap.
 
-v0.3.21 split: the GitHub Actions release workflow YAML is treated as
-user-owned (customizable `runs-on`, `permissions`, etc.) and bootstrap
-only writes it on first install. The Python scripts under `.github/yoink/`
-are plugin-owned and always updated on content diff.
+Installs the GitHub Actions release workflow into the user's repo and
+commits + pushes the result. The workflow YAML is user-owned (only
+written on first install, preserved on updates unless the template's
+schema version differs), and the Python scripts under `.github/yoink/`
+are plugin-owned (overwritten on content diff).
 
 If the template workflow YAML carries a newer schema version than the
 user's file, bootstrap halts completely — no stage, no commit, no push —
-and prints the diff for the user to merge manually. This prevents a
-partial-update state where release.py v2 ships alongside workflow v1.
+and prints the diff for the user to merge manually.
+
+v0.3.26: removed `ensure_config_file` since the client no longer uses a
+primary_branch config field (release detection lives entirely in the
+Actions workflow).
 """
 from __future__ import annotations
 import difflib
-import json
 import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
-
-import constants
-import gitops
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -31,24 +31,6 @@ RELEASE_SCRIPT_REL = ".github/yoink/release.py"
 STATE_SCRIPT_REL = ".github/yoink/state.py"
 
 _SCHEMA_RE = re.compile(r"#\s*yoink-release workflow\s*[—-]\s*schema v(\d+)")
-
-
-def ensure_config_file(cwd: Path) -> None:
-    target = cwd / constants.CONFIG_FILENAME
-    if target.exists():
-        print(f"[yoink] config {target}: ok (exists, unchanged)")
-        return
-    primary = gitops.detect_primary_branch(cwd) or "main"
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            json.dumps({"primary_branch": primary}, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    except OSError as e:
-        print(f"[yoink] config {target}: could not write ({e})", file=sys.stderr)
-        return
-    print(f"[yoink] config {target}: created (primary_branch={primary})")
 
 
 def _git(cwd: Path, *args, check=True):

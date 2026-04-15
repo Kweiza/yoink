@@ -202,41 +202,6 @@ def committed_paths_in_head(cwd: Path) -> Optional[Set[str]]:
     return {line for line in r.stdout.splitlines() if line.strip()}
 
 
-def detect_primary_branch(cwd: Path) -> Optional[str]:
-    """Return the repository's default branch name (e.g. 'main', 'master') by
-    consulting `refs/remotes/origin/HEAD`. Returns None if the symbolic ref
-    is unset (happens on repos cloned without default-branch tracking, or
-    fresh `git init` without a remote).
-    """
-    r = _run_git(cwd, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-    if r is None or r.returncode != 0:
-        return None
-    ref = r.stdout.strip()
-    prefix = "origin/"
-    if ref.startswith(prefix):
-        return ref[len(prefix):]
-    return None
-
-
-def path_ahead_of_primary(cwd: Path, primary_branch: str, path: str) -> bool:
-    """Return True iff there exist commits reachable from HEAD but not from
-    `origin/<primary_branch>` that touch `path`.
-
-    Used to decide whether my claim on `path` should still be held. If my
-    changes to `path` are fully contained in the primary branch (empty rev-list
-    output), the claim can be released — other teammates are safe.
-
-    Fail-open: any git error returns False (treat path as merged, release).
-    This errs on the side of releasing rather than hogging claims.
-    """
-    r = _run_git(cwd, [
-        "rev-list", f"origin/{primary_branch}..HEAD", "--", path,
-    ])
-    if r is None or r.returncode != 0:
-        return False
-    return bool(r.stdout.strip())
-
-
 def is_path_gitignored(cwd: Path, path: str) -> bool:
     """Return True iff `git check-ignore` considers `path` gitignored.
 

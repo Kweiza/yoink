@@ -28,42 +28,9 @@ def _seed_commit(repo: Path) -> None:
     _git(repo, "commit", "-qm", "init")
 
 
-# ── ensure_config_file ──────────────────────────────────────────────
-
-def test_ensure_config_file_creates_with_main_fallback(tmp_path, capsys):
-    repo = _init_repo(tmp_path / "r")
-    bootstrap.ensure_config_file(repo)
-    path = repo / ".claude" / "yoink.config.json"
-    assert path.exists()
-    data = json.loads(path.read_text())
-    assert data == {"primary_branch": "main"}
-    assert "created" in capsys.readouterr().out
-
-
-def test_ensure_config_file_respects_detected_primary(tmp_path, capsys):
-    upstream = _init_repo(tmp_path / "up")
-    (upstream / "seed.txt").write_text("seed")
-    _git(upstream, "add", "seed.txt")
-    _git(upstream, "commit", "-qm", "init")
-    _git(upstream, "branch", "-m", "trunk")
-    repo = tmp_path / "r"
-    subprocess.run(["git", "clone", "-q", str(upstream), str(repo)], check=True)
-    _git(repo, "config", "user.email", "t@t")
-    _git(repo, "config", "user.name", "t")
-    bootstrap.ensure_config_file(repo)
-    data = json.loads((repo / ".claude" / "yoink.config.json").read_text())
-    assert data == {"primary_branch": "trunk"}
-
-
-def test_ensure_config_file_noop_when_already_exists(tmp_path, capsys):
-    repo = _init_repo(tmp_path / "r")
-    (repo / ".claude").mkdir()
-    original = json.dumps({"primary_branch": "develop", "conflict_mode": "block"})
-    (repo / ".claude" / "yoink.config.json").write_text(original)
-    bootstrap.ensure_config_file(repo)
-    assert (repo / ".claude" / "yoink.config.json").read_text() == original
-    assert "ok (exists, unchanged)" in capsys.readouterr().out
-
+# v0.3.26: ensure_config_file was removed — client no longer uses a
+# primary_branch config field. All release detection lives in the
+# Actions workflow.
 
 # ── install_release_workflow ─────────────────────────────────────────
 

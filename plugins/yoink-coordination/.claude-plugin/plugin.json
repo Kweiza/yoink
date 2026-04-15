@@ -1,6 +1,6 @@
 {
   "name": "yoink-coordination",
-  "version": "0.3.25",
+  "version": "0.3.26",
   "description": "Single-repo team coordination for Claude Code sessions",
   "author": { "name": "kweiza" },
   "hooks": {
