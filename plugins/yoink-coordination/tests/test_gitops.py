@@ -15,11 +15,29 @@ import pytest
     ("git add . && git commit -m wip && git push", True),
     ("git status; git commit -m wip", True),
     ("git status\ngit commit -m wip", True),
+    # heredoc-style commits (Claude Code's default pattern — must detect)
+    (
+        "git add x && git commit -m \"$(cat <<'EOF'\n"
+        "feat: something\n\n"
+        "Co-Authored-By: someone\n"
+        "EOF\n"
+        ")\" && git push",
+        True,
+    ),
+    (
+        "git commit -m \"$(cat <<'EOF'\nline1\nline2\nEOF\n)\"",
+        True,
+    ),
     # negatives
     ("git status", False),
     ("git commit-tree -m wip", False),
     ("git commit-graph write", False),
     ("echo 'git commit' >> notes.txt", False),
+    # heredoc whose content contains "git commit" text — echo first, not git
+    (
+        "echo \"$(cat <<'EOF'\ngit commit -m fake\nEOF\n)\" > notes.txt",
+        False,
+    ),
     ("", False),
     ("ls", False),
     # alias / indirection (unsupported, must be False)

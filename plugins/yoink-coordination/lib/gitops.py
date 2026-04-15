@@ -56,23 +56,83 @@ def _tokens_after_git(tokens: List[str]) -> Optional[List[str]]:
     return None
 
 
+def _quote_aware_segments(command: str) -> List[str]:
+    """Split `command` on shell statement separators (`&&`, `||`, `;`, `|`, `&`,
+    `\\n`) but ONLY outside quoted contexts.
+
+    Critical for heredoc-style commits where the commit message spans multiple
+    lines inside a `"$(cat <<'EOF' ... EOF)"` interpolation. Naive split on
+    `\\n` would cut the quoted string and break shlex parsing of each half.
+    """
+    segments: List[str] = []
+    buf: List[str] = []
+    i = 0
+    n = len(command or "")
+    quote: Optional[str] = None  # None | "'" | '"'
+    while i < n:
+        c = command[i]
+        if quote is not None:
+            buf.append(c)
+            if c == "\\" and quote == '"' and i + 1 < n:
+                # Escaped char inside double-quote (e.g. \" or \\); buffer both.
+                buf.append(command[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c == "'" or c == '"':
+            quote = c
+            buf.append(c)
+            i += 1
+            continue
+        # Outside quotes: check statement separators
+        if c in "&|":
+            # && or || → two-char operator
+            if i + 1 < n and command[i + 1] == c:
+                segments.append("".join(buf))
+                buf = []
+                i += 2
+                continue
+            # single & (background) or | (pipe)
+            segments.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        if c == ";" or c == "\n":
+            segments.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    if buf:
+        segments.append("".join(buf))
+    return [s for s in (seg.strip() for seg in segments) if s]
+
+
 def is_git_commit_command(command: str) -> bool:
     """Return True iff `command`, parsed per spec §3.2.1, contains a `git commit`
     invocation in any of its statement segments.
 
+    Strategy: segment the command on shell statement separators using a
+    quote-aware state machine (so newlines / semicolons inside `"..."` or
+    `'...'` quoted strings — e.g. heredoc commit messages — do NOT split the
+    command). Then shlex-split each segment and check for `git commit`.
+
     Rules:
-    - Split on `&&`, `||`, `;`, `\\n`.
-    - shlex.split each segment.
+    - Statement separators: `&&`, `||`, `;`, `|`, `&`, `\\n` — respected only
+      outside quoted contexts.
     - After the first bare `git` token in a segment, skip value-taking options
       (`-C path`, `-c k=v`, `--git-dir=...`, `--work-tree=...`) and other `-` flags.
-    - Next non-option token must be exactly `commit` (regex `^commit$`).
+    - Next non-option token must be exactly `commit`.
     - `commit-tree`, `commit-graph`, etc. do not match.
-    - Heredocs / echo'd strings are filtered automatically by shlex.split.
     - Aliases (`gc`) and `eval "..."` are intentionally NOT supported.
+    - Heredoc-quoted messages (`git commit -m "$(cat <<'EOF' ... EOF)"`) are
+      preserved as a single token and correctly detected.
     """
-    for segment in _iter_segments(command):
-        if not segment:
-            continue
+    for segment in _quote_aware_segments(command or ""):
         try:
             tokens = shlex.split(segment)
         except ValueError:
