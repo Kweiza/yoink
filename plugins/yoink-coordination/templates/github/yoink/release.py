@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""yoink release script — runs in a GitHub Action on push to default branch.
+
+For each open `yoink:status` issue in this repo:
+  1. Parse the body to extract sessions + their declared_files.
+  2. Drop any declared path whose merge to the default branch is in this push.
+  3. If a session's declared_files becomes empty, drop the session.
+  4. If the issue's session list becomes empty, close the issue and remove
+     the active label.
+  5. Otherwise edit the issue body in place.
+
+Inputs (env):
+  GH_TOKEN  — GitHub token with `issues: write`
+  REPO      — owner/name of this repo
+  BEFORE    — push event "before" SHA (may be 40 zeros for first push)
+  AFTER     — push event "after" SHA (current ref tip)
+  PRIMARY   — default branch name (informational; release is per-merged-path)
+
+Exits non-zero on any unrecoverable error so the Action surfaces it.
+"""
+from __future__ import annotations
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+THIS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(THIS_DIR))
+
+import state as state_mod  # noqa: E402
+
+LABEL_STATUS = "yoink:status"
+LABEL_ACTIVE = "yoink:active"
+
+
+def _run(cmd, check=True, capture=True):
+    p = subprocess.run(
+        cmd, check=check,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+        text=True,
+    )
+    return p.stdout if capture else ""
+
+
+def _changed_paths(before: str, after: str):
+    """All paths touched between BEFORE..AFTER. For first-push (BEFORE=0..0)
+    treat AFTER as a single-commit list."""
+    if not before or before.strip("0") == "":
+        out = _run(["git", "show", "--name-only", "--pretty=", after])
+    else:
+        out = _run(["git", "diff", "--name-only", before, after])
+    return {ln.strip() for ln in out.splitlines() if ln.strip()}
+
+
+def _gh_json(*args):
+    out = _run(["gh"] + list(args))
+    return json.loads(out) if out.strip() else None
+
+
+def _list_status_issues(repo: str):
+    return _gh_json(
+        "issue", "list",
+        "--repo", repo,
+        "--state", "open",
+        "--label", LABEL_STATUS,
+        "--json", "number,body,assignees",
+        "--limit", "100",
+    ) or []
+
+
+def _login_for(issue) -> str:
+    assignees = issue.get("assignees") or []
+    if not assignees:
+        return ""
+    return assignees[0].get("login") or ""
+
+
+def _release_in_session(session: state_mod.Session, changed: set) -> bool:
+    """Drop declared_files entries whose path is in `changed`. Returns True
+    if anything was released."""
+    if not session.declared_files:
+        return False
+    kept = [
+        e for e in session.declared_files
+        if isinstance(e, dict) and e.get("path") not in changed
+    ]
+    if len(kept) == len(session.declared_files):
+        return False
+    session.declared_files = kept
+    return True
+
+
+def _process_issue(repo: str, issue: dict, changed: set) -> str:
+    """Returns one of: 'no-change', 'edited', 'closed'."""
+    body = issue.get("body") or ""
+    parsed, corrupt = state_mod.parse_body(body)
+    if corrupt or not parsed.sessions:
+        return "no-change"
+
+    any_change = False
+    surviving = []
+    for s in parsed.sessions:
+        released = _release_in_session(s, changed)
+        any_change = any_change or released
+        if s.declared_files:
+            surviving.append(s)
+        else:
+            any_change = True  # session dropped
+    if not any_change:
+        return "no-change"
+    parsed.sessions = surviving
+
+    login = _login_for(issue) or "user"
+    new_body = state_mod.render_body(parsed, login=login, preserve_tail_from=body)
+    num = issue["number"]
+    if not parsed.sessions:
+        _run(["gh", "issue", "edit", str(num), "--repo", repo, "--body", new_body])
+        try:
+            _run(["gh", "issue", "edit", str(num), "--repo", repo,
+                  "--remove-label", LABEL_ACTIVE], check=False)
+        except subprocess.CalledProcessError:
+            pass
+        _run(["gh", "issue", "close", str(num), "--repo", repo])
+        return "closed"
+    _run(["gh", "issue", "edit", str(num), "--repo", repo, "--body", new_body])
+    return "edited"
+
+
+def main() -> int:
+    repo = os.environ.get("REPO", "")
+    before = os.environ.get("BEFORE", "")
+    after = os.environ.get("AFTER", "")
+    if not repo or not after:
+        print("[yoink-action] missing REPO / AFTER env", file=sys.stderr)
+        return 2
+    try:
+        changed = _changed_paths(before, after)
+    except subprocess.CalledProcessError as e:
+        print(f"[yoink-action] git diff failed: {e.stderr}", file=sys.stderr)
+        return 2
+    if not changed:
+        print("[yoink-action] no changed paths in push; nothing to release.")
+        return 0
+    print(f"[yoink-action] push touched {len(changed)} path(s).")
+
+    try:
+        issues = _list_status_issues(repo)
+    except subprocess.CalledProcessError as e:
+        print(f"[yoink-action] gh issue list failed: {e.stderr}", file=sys.stderr)
+        return 2
+
+    edited = closed = 0
+    for issue in issues:
+        try:
+            result = _process_issue(repo, issue, changed)
+        except subprocess.CalledProcessError as e:
+            print(f"[yoink-action] issue #{issue.get('number')} failed: {e.stderr}",
+                  file=sys.stderr)
+            continue
+        if result == "edited":
+            edited += 1
+            print(f"[yoink-action] issue #{issue['number']}: released paths.")
+        elif result == "closed":
+            closed += 1
+            print(f"[yoink-action] issue #{issue['number']}: closed (no sessions left).")
+    print(f"[yoink-action] done — {edited} edited, {closed} closed.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

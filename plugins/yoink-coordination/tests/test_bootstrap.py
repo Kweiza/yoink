@@ -61,3 +61,46 @@ def test_ensure_config_file_noop_when_already_exists(tmp_path, capsys):
     unchanged = (repo / ".claude" / "yoink.config.json").read_text()
     assert unchanged == original  # preserve user's existing settings verbatim
     assert "ok (exists, unchanged)" in capsys.readouterr().out
+
+
+# ----- v0.3.19 install_release_workflow -----
+def test_install_release_workflow_stages_files_and_commits(tmp_path, capsys):
+    """Fresh repo + workflow not yet installed → 3 files staged, committed.
+    Push fails (no remote) but commit must remain locally."""
+    repo = _init_repo(tmp_path / "r")
+    # need at least one initial commit for git push to even attempt
+    (repo / "README.md").write_text("seed\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-qm", "init")
+
+    bootstrap.install_release_workflow(repo)
+    out = capsys.readouterr()
+
+    # Files exist
+    assert (repo / ".github/workflows/yoink-release.yml").exists()
+    assert (repo / ".github/yoink/release.py").exists()
+    assert (repo / ".github/yoink/state.py").exists()
+
+    # Commit happened
+    log = subprocess.run(
+        ["git", "-C", str(repo), "log", "--format=%s", "-1"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert "yoink: install/update release workflow" in log
+
+    # No upstream → push fails → message printed to stderr
+    assert "push failed" in out.err or "push manually" in out.err
+
+
+def test_install_release_workflow_idempotent(tmp_path, capsys):
+    """Running twice with no template changes → second run is a no-op."""
+    repo = _init_repo(tmp_path / "r")
+    (repo / "README.md").write_text("seed\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-qm", "init")
+
+    bootstrap.install_release_workflow(repo)
+    capsys.readouterr()  # drain
+    bootstrap.install_release_workflow(repo)
+    out = capsys.readouterr()
+    assert "already up to date" in out.out
