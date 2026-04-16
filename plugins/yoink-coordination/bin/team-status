@@ -58,13 +58,11 @@ def main() -> int:
     if args.markdown:
         print(render.team_status_markdown(
             members,
-            stale_threshold_seconds=cfg.stale_threshold_seconds,
             now_iso=now_iso,
         ))
     else:
         print(render.team_status_ansi(
             members,
-            stale_threshold_seconds=cfg.stale_threshold_seconds,
             now_iso=now_iso,
         ))
     return 0

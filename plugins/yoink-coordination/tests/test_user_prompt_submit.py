@@ -49,7 +49,6 @@ def test_reminder_printed_when_task_summary_missing(capsys, monkeypatch, tmp_pat
     me = state_mod.Session(
         session_id="s", worktree_path=str(tmp_path), branch="main",
         task_issue=None, started_at="2026-04-15T00:00:00Z",
-        last_heartbeat="2026-04-15T00:00:00Z",
         declared_files=[], driven_by="claude-code",
         claude_session_id="s-1",
         task_summary=None,
@@ -91,7 +90,6 @@ def test_reminder_suppressed_when_task_summary_set(capsys, monkeypatch, tmp_path
     me = state_mod.Session(
         session_id="s", worktree_path=str(tmp_path), branch="main",
         task_issue=None, started_at="2026-04-15T00:00:00Z",
-        last_heartbeat="2026-04-15T00:00:00Z",
         declared_files=[], driven_by="claude-code",
         claude_session_id="s-1",
         task_summary="Implement 2FA login",
@@ -208,7 +206,6 @@ def test_upsubmit_does_not_inherit_other_session_task(tmp_path, monkeypatch):
         session_id="old", worktree_path="/wt", branch="main",
         task_issue=None,
         started_at="2026-04-15T10:00:00Z",
-        last_heartbeat="2026-04-15T10:00:00Z",
         declared_files=[],
         driven_by="claude-code",
         claude_session_id="ccs-OLD",
@@ -291,7 +288,6 @@ def test_upsubmit_empty_summary_prints_reminder_and_no_cache(tmp_path, monkeypat
         session_id="s", worktree_path="/wt", branch="main",
         task_issue=None,
         started_at="2026-04-15T10:00:00Z",
-        last_heartbeat="2026-04-15T10:00:00Z",
         declared_files=[{"path": "x.py", "declared_at": "2026-04-15T10:00:00Z"}],
         driven_by="claude-code",
         claude_session_id="ccs-me",

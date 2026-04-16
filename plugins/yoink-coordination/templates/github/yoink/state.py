@@ -22,11 +22,12 @@ class Session:
     branch: str
     task_issue: Optional[str]
     started_at: str
-    last_heartbeat: str
     declared_files: list
     driven_by: str
     claude_session_id: Optional[str]
     task_summary: Optional[str] = None
+    # Legacy `last_heartbeat` key from pre-v0.3.28 bodies is preserved
+    # via _extra and round-trips intact.
     _extra: dict = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self):
@@ -123,22 +124,21 @@ def _render_summary(state, login):
     n = len(state.sessions)
     if n == 0:
         return f"**@{login}** — no active sessions"
-    latest = max((s.last_heartbeat for s in state.sessions), default=state.updated_at)
-    return f"**@{login}** — {n} active session{'s' if n != 1 else ''} · last heartbeat {latest}"
+    return f"**@{login}** — {n} active session{'s' if n != 1 else ''}"
 
 
 def _render_table(state):
     header = (
-        "| Worktree | Branch | Task | Files | Started | Heartbeat |\n"
-        "|---|---|---|---|---|---|"
+        "| Worktree | Branch | Task | Files | Started |\n"
+        "|---|---|---|---|---|"
     )
     if not state.sessions:
-        return header + "\n| _(none)_ | | | | | |"
+        return header + "\n| _(none)_ | | | | |"
     rows = [
         f"| {_cell(_basename(s.worktree_path))} | {_cell(s.branch)} | "
         f"{_cell(format_task_cell(s.task_issue, s.task_summary))} | "
         f"{_cell(format_files_cell(s.declared_files or []))} | "
-        f"{_cell(s.started_at)} | {_cell(s.last_heartbeat)} |"
+        f"{_cell(s.started_at)} |"
         for s in state.sessions
     ]
     return header + "\n" + "\n".join(rows)

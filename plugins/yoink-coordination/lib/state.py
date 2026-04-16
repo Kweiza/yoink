@@ -14,13 +14,16 @@ class Session:
     branch: str
     task_issue: Optional[str]
     started_at: str
-    last_heartbeat: str
     declared_files: list
     driven_by: str
     claude_session_id: Optional[str]
     # v0.3.8+: human-entered 1-2 sentence summary of what this session is
     # doing. Set via /yoink-coordination:task. None until recorded.
     task_summary: Optional[str] = None
+    # v0.3.28: legacy issue bodies may carry a `last_heartbeat` key that
+    # parse_body routes through _extra, preserving round-trip. The field
+    # itself was dropped because it only powered a display column and a
+    # stale-session heuristic that Actions made obsolete.
     _extra: dict = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self):
@@ -101,8 +104,7 @@ def _render_summary(state: State, login: str) -> str:
     n = len(state.sessions)
     if n == 0:
         return f"**@{login}** — no active sessions"
-    latest = max((s.last_heartbeat for s in state.sessions), default=state.updated_at)
-    return f"**@{login}** — {n} active session{'s' if n != 1 else ''} · last heartbeat {latest}"
+    return f"**@{login}** — {n} active session{'s' if n != 1 else ''}"
 
 def _cell(value) -> str:
     return str(value).replace("|", "\\|") if value is not None else "—"
@@ -162,16 +164,16 @@ def format_files_cell(declared_files: list) -> str:
 
 def _render_table(state: State) -> str:
     header = (
-        "| Worktree | Branch | Task | Files | Started | Heartbeat |\n"
-        "|---|---|---|---|---|---|"
+        "| Worktree | Branch | Task | Files | Started |\n"
+        "|---|---|---|---|---|"
     )
     if not state.sessions:
-        return header + "\n| _(none)_ | | | | | |"
+        return header + "\n| _(none)_ | | | | |"
     rows = [
         f"| {_cell(_basename(s.worktree_path))} | {_cell(s.branch)} | "
         f"{_cell(format_task_cell(s.task_issue, s.task_summary))} | "
         f"{_cell(format_files_cell(s.declared_files or []))} | "
-        f"{_cell(s.started_at)} | {_cell(s.last_heartbeat)} |"
+        f"{_cell(s.started_at)} |"
         for s in state.sessions
     ]
     return header + "\n" + "\n".join(rows)

@@ -94,7 +94,6 @@ def _make_session():
     return state_mod.Session(
         session_id="s", worktree_path="/tmp/wt", branch="b",
         task_issue=None, started_at="2026-04-14T10:00:00Z",
-        last_heartbeat="2026-04-14T10:00:00Z",
         declared_files=[], driven_by="claude-code",
         claude_session_id="test-session-id",
     )
@@ -111,15 +110,16 @@ def _make_ctx(worktree_path: str = "/tmp/wt", branch: str = "b"):
     )
 
 
-def test_pretooluse_cooldown_expired_triggers_heartbeat_write(tmp_path):
-    """No claim change + cooldown expired → still writes body with updated heartbeat."""
+def test_pretooluse_no_body_write_when_already_claimed(tmp_path):
+    """v0.3.28: heartbeat cooldown machinery removed. Already-claimed
+    dedup path with no conflict → no body edit (prior
+    'cooldown-expired-triggers-write' branch is gone)."""
     import state as state_mod
 
     me = state_mod.Session(
         session_id="s", worktree_path=str(tmp_path), branch="main",
         task_issue=None,
         started_at="2026-04-14T00:00:00Z",
-        last_heartbeat="2026-04-14T00:00:00Z",  # very old (much older than cooldown)
         declared_files=[{"path": "already.py", "declared_at": "2026-04-14T00:00:00Z"}],
         driven_by="claude-code",
         claude_session_id="test-session-id",
@@ -142,44 +142,6 @@ def test_pretooluse_cooldown_expired_triggers_heartbeat_write(tmp_path):
          patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx(str(tmp_path), "main")):
         rc = hook.run(stdin_text=payload)
     assert rc == 0
-    # Already claimed (dedup) → no structural change → but cooldown is expired,
-    # so a body edit must still happen.
-    assert len(writes) == 1
-
-
-def test_pretooluse_cooldown_not_expired_skips_body_write(tmp_path):
-    """Already-claimed dedup path + fresh heartbeat → body edit skipped."""
-    import state as state_mod
-
-    fresh_hb = "2030-01-01T12:00:00Z"  # far in the future → never stale
-
-    me = state_mod.Session(
-        session_id="s", worktree_path=str(tmp_path), branch="main",
-        task_issue=None,
-        started_at=fresh_hb, last_heartbeat=fresh_hb,
-        declared_files=[{"path": "already.py", "declared_at": fresh_hb}],
-        driven_by="claude-code",
-        claude_session_id="test-session-id",
-    )
-    parsed = state_mod.State(updated_at="", sessions=[me])
-    existing_body = state_mod.render_body(parsed, login="kweiza")
-
-    payload = _hook_input(file_path=str(tmp_path / "already.py"))
-
-    writes = []
-    with patch.object(hook, "_project_dir", return_value=tmp_path), \
-         patch.object(hook, "_is_gitignored", return_value=False), \
-         patch.object(hook, "_gh_auth_ok", return_value=True), \
-         patch.object(hook, "_load_config", return_value=_cfg()), \
-         patch.object(hook, "_acquire_lock_ctx", _fake_lock_ctx()), \
-         patch.object(hook, "_fetch_my_issue", return_value=(1, parsed, existing_body, False)), \
-         patch.object(hook, "_fetch_others", return_value=[]), \
-         patch.object(hook, "_write_body", side_effect=lambda *a, **k: writes.append(a) or True), \
-         patch("pre_tool_use.gitops.working_tree_paths", return_value={"already.py"}), \
-         patch("pre_tool_use.ctx_mod.build_context", return_value=_make_ctx(str(tmp_path), "main")):
-        rc = hook.run(stdin_text=payload)
-    assert rc == 0
-    # Neither structural change nor cooldown expired → no body edit.
     assert len(writes) == 0
 
 
@@ -401,7 +363,6 @@ def test_find_my_session_does_not_inherit_other_session_entry():
         session_id="old", worktree_path="/wt", branch="main",
         task_issue=None,
         started_at="2026-04-15T10:00:00Z",
-        last_heartbeat="2026-04-15T10:00:00Z",
         declared_files=[{"path": "a.py", "declared_at": "2026-04-15T10:00:00Z"}],
         driven_by="claude-code",
         claude_session_id="ccs-OLD",
@@ -423,7 +384,6 @@ def test_find_my_session_falls_back_to_legacy_no_ccs_entry():
         session_id="legacy", worktree_path="/wt", branch="main",
         task_issue=None,
         started_at="2026-04-15T10:00:00Z",
-        last_heartbeat="2026-04-15T10:00:00Z",
         declared_files=[],
         driven_by="claude-code",
         claude_session_id=None,

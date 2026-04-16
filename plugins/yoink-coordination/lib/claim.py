@@ -52,46 +52,8 @@ def release(
     return kept, removed
 
 
-from datetime import datetime, timedelta, timezone
-
-
-def _parse_iso_utc(s):
-    """Return datetime or None on malformed input. Inherits Phase 3 warning.py pattern."""
-    if not isinstance(s, str) or not s:
-        return None
-    try:
-        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        return None
-
-
-def find_stale_sessions(sessions, now_iso, threshold_seconds):
-    """Return the subset of `sessions` whose heartbeat is older than threshold.
-
-    Heartbeat source: session.last_heartbeat (preferred); falls back to
-    session.started_at if last_heartbeat is empty/null.
-
-    **Per-session fail-safe**: if parsing a given session's timestamp fails
-    (ISO malformed, both fields empty, etc.), that session is EXCLUDED from
-    the returned list — conservatively treated as "not stale" so we never
-    accidentally remove an entry we can't judge. The function itself does
-    not raise; other sessions in the same call are evaluated normally.
-    """
-    now = _parse_iso_utc(now_iso)
-    if now is None:
-        return []  # can't evaluate — nothing is stale
-    threshold = now - timedelta(seconds=threshold_seconds)
-    stale = []
-    for s in sessions:
-        hb = _parse_iso_utc(getattr(s, "last_heartbeat", "") or getattr(s, "started_at", ""))
-        if hb is None:
-            continue  # per-session fail-safe
-        if hb < threshold:
-            stale.append(s)
-    return stale
-
-
-def remove_sessions(sessions, to_remove):
-    """Return a new list excluding sessions that are in `to_remove` (identity-based)."""
-    to_remove_ids = {id(s) for s in to_remove}
-    return [s for s in sessions if id(s) not in to_remove_ids]
+# v0.3.15 removed the self-heal call site; v0.3.28 removes the unused
+# helpers (find_stale_sessions / remove_sessions) along with the
+# heartbeat machinery. Session staleness is now implicit: an entry
+# survives until the Actions release workflow releases its declared
+# paths (or a human deletes the row in the issue body).

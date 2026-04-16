@@ -229,9 +229,12 @@ def _release_in_session(session: state_mod.Session, primary: str) -> bool:
             kept.append(e)
             continue
         path = e.get("path")
+        # Legacy fallback: very old entries may lack `declared_at` and
+        # last_heartbeat. `session.started_at` is always present so it
+        # keeps the release check working even on pre-v0.3.28 bodies.
         declared_at = (
             e.get("declared_at")
-            or session.last_heartbeat
+            or (session._extra.get("last_heartbeat") if session._extra else "")
             or session.started_at
         )
         if path and _should_release(primary, session.branch, path, declared_at):

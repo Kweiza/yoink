@@ -69,32 +69,21 @@ def test_phase4_reserved_key_is_recognized_not_warned(tmp_path):
     assert cfg.conflict_mode == "advisory"
     assert not any("_phase4_reserved" in w for w in warnings)
 
-def test_heartbeat_cooldown_default_and_override(tmp_path):
+# v0.3.28: heartbeat_cooldown_seconds and stale_threshold_seconds are
+# legacy no-op keys (heartbeat machinery retired). Kept recognized so
+# pre-v0.3.28 yoink.config.json files don't trigger unknown-key warnings.
+def test_legacy_heartbeat_keys_are_silently_ignored(tmp_path):
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude" / "yoink.config.json").write_text(
-        '{"heartbeat_cooldown_seconds": 60}'
+        '{"heartbeat_cooldown_seconds": 60,'
+        ' "stale_threshold_seconds": 1800,'
+        ' "conflict_mode": "advisory"}'
     )
     cfg, warnings = load_config(tmp_path)
-    assert cfg.heartbeat_cooldown_seconds == 60
-    assert not warnings
-
-def test_heartbeat_cooldown_out_of_range_falls_back_to_default(tmp_path):
-    (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude" / "yoink.config.json").write_text(
-        '{"heartbeat_cooldown_seconds": 0}'
-    )
-    cfg, warnings = load_config(tmp_path)
-    assert cfg.heartbeat_cooldown_seconds == 120  # default
-    assert any("heartbeat_cooldown_seconds" in w for w in warnings)
-
-def test_stale_threshold_default_and_override(tmp_path):
-    (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude" / "yoink.config.json").write_text(
-        '{"stale_threshold_seconds": 1800}'
-    )
-    cfg, warnings = load_config(tmp_path)
-    assert cfg.stale_threshold_seconds == 1800
-    assert not warnings
+    assert warnings == []
+    assert cfg.conflict_mode == "advisory"
+    assert not hasattr(cfg, "heartbeat_cooldown_seconds")
+    assert not hasattr(cfg, "stale_threshold_seconds")
 
 def test_underscore_prefix_key_silently_ignored(tmp_path):
     (tmp_path / ".claude").mkdir()
@@ -107,16 +96,6 @@ def test_underscore_prefix_key_silently_ignored(tmp_path):
     assert not any("_phase4_reserved" in w for w in warnings)
     assert not any("_phase5_reserved" in w for w in warnings)
     assert not any("_future_phaseN_reserved" in w for w in warnings)
-
-def test_stale_threshold_out_of_range_falls_back_to_default(tmp_path):
-    (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude" / "yoink.config.json").write_text(
-        '{"stale_threshold_seconds": 30}'
-    )
-    cfg, warnings = load_config(tmp_path)
-    assert cfg.stale_threshold_seconds == 900  # default
-    assert any("stale_threshold_seconds" in w for w in warnings)
-
 
 def test_non_underscore_unknown_key_still_warns(tmp_path):
     (tmp_path / ".claude").mkdir()

@@ -38,6 +38,4 @@ DRIVEN_BY_CLAUDE_CODE = "claude-code"
 GIT_CHECK_IGNORE_IS_IGNORED = 0
 GIT_CHECK_IGNORE_NOT_IGNORED = 1
 
-# Phase 4 additions (§3 of phase4 spec)
-DEFAULT_HEARTBEAT_COOLDOWN_SECONDS = 120
-DEFAULT_STALE_THRESHOLD_SECONDS = 900
+# Phase 4 additions removed in v0.3.28 (heartbeat machinery retired).

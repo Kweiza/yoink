@@ -5,7 +5,7 @@ from state import State, Session, parse_body, render_body, dedup_key
 def _session(sid="s1", ws="/ws/a", branch="main", ccs=None):
     return Session(
         session_id=sid, worktree_path=ws, branch=branch, task_issue=None,
-        started_at="2026-04-14T10:00:00Z", last_heartbeat="2026-04-14T10:00:00Z",
+        started_at="2026-04-14T10:00:00Z",
         declared_files=[], driven_by="claude-code", claude_session_id=ccs,
     )
 
@@ -78,7 +78,9 @@ def test_roundtrip_preserves_declared_files_field():
 
 def test_pluralization_single_session_uses_singular():
     body = render_body(State("2026-04-14T10:00:00Z", [_session()]), login="alice")
-    assert "1 active session · " in body  # singular
+    # v0.3.28: summary no longer includes heartbeat, so the line ends
+    # after "1 active session".
+    assert "1 active session" in body
     assert "1 active sessions" not in body
 
 def test_parse_malformed_one_session_keeps_others():
@@ -164,13 +166,12 @@ def test_render_body_includes_files_column_and_task_summary():
     s = Session(
         session_id="s1", worktree_path="/tmp/r", branch="feat-42",
         task_issue="repo#42", started_at="2026-04-15T00:00:00Z",
-        last_heartbeat="2026-04-15T00:00:00Z",
         declared_files=[{"path": "a.py", "declared_at": "t"}],
         driven_by="claude-code", claude_session_id="ccs-1",
         task_summary="Add 2FA",
     )
     body = render_body(State(updated_at="now", sessions=[s]), login="alice")
-    assert "| Worktree | Branch | Task | Files | Started | Heartbeat |" in body
+    assert "| Worktree | Branch | Task | Files | Started |" in body
     assert "#42 · Add 2FA" in body
     assert "a.py" in body
 
@@ -181,7 +182,6 @@ def test_parse_body_roundtrips_task_summary():
     s = Session(
         session_id="s1", worktree_path="/tmp/r", branch="b",
         task_issue=None, started_at="2026-04-15T00:00:00Z",
-        last_heartbeat="2026-04-15T00:00:00Z",
         declared_files=[], driven_by="claude-code",
         claude_session_id="ccs-1", task_summary="Refactor auth",
     )

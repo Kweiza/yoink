@@ -44,7 +44,6 @@ def _print_other_members(ctx, cfg):
     print("[yoink] other active members:")
     print(render.team_status_markdown(
         members,
-        stale_threshold_seconds=cfg.stale_threshold_seconds,
         now_iso=ctx_mod.now_utc_iso(),
     ))
 

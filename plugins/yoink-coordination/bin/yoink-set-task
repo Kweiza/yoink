@@ -171,7 +171,6 @@ def main(argv):
                     branch=ctx.branch,
                     task_issue=ctx.task_issue,
                     started_at=ctx.started_at,
-                    last_heartbeat=ctx.started_at,
                     declared_files=[],
                     driven_by=constants.DRIVEN_BY_CLAUDE_CODE,
                     claude_session_id=ctx.claude_session_id,
@@ -211,7 +210,6 @@ def main(argv):
             for path in normalized:
                 new_declared, _ = claim.acquire(new_declared, path, now=now)
             target.declared_files = new_declared
-            target.last_heartbeat = now
 
             parsed.updated_at = now
             new_body = state_mod.render_body(

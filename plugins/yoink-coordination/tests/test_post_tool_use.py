@@ -70,7 +70,6 @@ def test_commit_success_bumps_heartbeat_on_matched_session(tmp_path):
         session_id="s", worktree_path="/w", branch="main",
         task_issue=None,
         started_at="2026-04-14T00:00:00Z",
-        last_heartbeat="2026-04-14T00:00:00Z",  # stale
         declared_files=[],
         driven_by="claude-code",
         claude_session_id="test-session-id",
@@ -119,7 +118,6 @@ def test_commit_success_skips_write_when_no_matching_session(tmp_path):
         session_id="other", worktree_path="/other", branch="other",
         task_issue=None,
         started_at="2026-04-14T10:00:00Z",
-        last_heartbeat="2026-04-14T10:00:00Z",
         declared_files=[],
         driven_by="claude-code", claude_session_id="ccs-other",
     )

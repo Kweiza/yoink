@@ -43,21 +43,6 @@ TARGET_TOOLS = {"Edit", "Write"}
 BLOCK_EXIT_CODE = 2  # Per spec §5.2; verified in E2E T16.
 
 
-def _heartbeat_cooldown_expired(last_heartbeat: str, now_iso: str, cooldown_s: int) -> bool:
-    """Return True iff (now - last_heartbeat) > cooldown. Fail-safe: False on parse error."""
-    from datetime import datetime, timedelta, timezone
-    def _p(s):
-        try:
-            return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        except (ValueError, TypeError):
-            return None
-    hb = _p(last_heartbeat)
-    n = _p(now_iso)
-    if hb is None or n is None:
-        return False
-    return (n - hb) > timedelta(seconds=cooldown_s)
-
-
 def _label(prefix: str, suffix: str) -> str:
     return f"{prefix}:{suffix}"
 
@@ -275,7 +260,6 @@ def run(stdin_text: Optional[str] = None) -> int:
                         branch=ctx.branch,
                         task_issue=ctx.task_issue,
                         started_at=ctx.started_at,
-                        last_heartbeat=ctx.started_at,
                         declared_files=[],
                         driven_by=constants.DRIVEN_BY_CLAUDE_CODE,
                         claude_session_id=cur_ccs,
@@ -307,8 +291,6 @@ def run(stdin_text: Optional[str] = None) -> int:
                 # 10. Block branch
                 if decision.should_block:
                     me.declared_files = new_declared  # still apply cleanup
-                    # Phase 4: blocked tool call is still user activity — bump heartbeat.
-                    me.last_heartbeat = ctx_mod.now_utc_iso()
                     _write_body(num, ctx.login, parsed, existing)
                     msg = warning.format_conflict(
                         path=norm, owners=conflicting_owners,
@@ -331,11 +313,7 @@ def run(stdin_text: Optional[str] = None) -> int:
                         "pre_tool_use", "acquire",
                         path_hash=telemetry.path_hash(norm),
                     )
-                cooldown_expired = _heartbeat_cooldown_expired(
-                    me.last_heartbeat, now, cfg.heartbeat_cooldown_seconds,
-                )
-                if changed or removed or cooldown_expired or reconciled or issue_created:
-                    me.last_heartbeat = now
+                if changed or removed or reconciled or issue_created:
                     _write_body(num, ctx.login, parsed, existing)
                 if issue_created:
                     # Only attach yoink:active when this hook actually created

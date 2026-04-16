@@ -12,16 +12,16 @@ class Config:
     conflict_mode: str = constants.DEFAULT_CONFLICT_MODE
     label_prefix: str = constants.DEFAULT_LABEL_PREFIX
     lock_timeout_seconds: int = constants.DEFAULT_LOCK_TIMEOUT_SECONDS
-    heartbeat_cooldown_seconds: int = constants.DEFAULT_HEARTBEAT_COOLDOWN_SECONDS
-    stale_threshold_seconds: int = constants.DEFAULT_STALE_THRESHOLD_SECONDS
 
 KNOWN_ROOT_KEYS = {
     "conflict_mode", "label_prefix", "lock_timeout_seconds",
-    "heartbeat_cooldown_seconds", "stale_threshold_seconds",
     # Legacy keys — recognized (no warning) but ignored in v0.3.26+.
-    # Release detection moved to the GitHub Actions workflow; Stop hook
-    # no longer needs the primary branch name.
     "primary_branch",
+    # v0.3.28: heartbeat machinery removed (see journal). The two
+    # timing configs stay recognized so existing yoink.config.json
+    # files don't trip the unknown-key warning.
+    "heartbeat_cooldown_seconds",
+    "stale_threshold_seconds",
 }
 
 def load_config(repo_root: Path) -> Tuple[Config, List[str]]:
@@ -63,25 +63,9 @@ def load_config(repo_root: Path) -> Tuple[Config, List[str]]:
         else:
             warnings.append(f"config: lock_timeout_seconds '{v}' out of range [1,60]; using default")
 
-    if "heartbeat_cooldown_seconds" in raw:
-        v = raw["heartbeat_cooldown_seconds"]
-        if isinstance(v, int) and 1 <= v <= 3600:
-            cfg.heartbeat_cooldown_seconds = v
-        else:
-            warnings.append(f"config: heartbeat_cooldown_seconds '{v}' out of range [1,3600]; using default")
-
-    if "stale_threshold_seconds" in raw:
-        v = raw["stale_threshold_seconds"]
-        if isinstance(v, int) and 60 <= v <= 86400:
-            cfg.stale_threshold_seconds = v
-        else:
-            warnings.append(f"config: stale_threshold_seconds '{v}' out of range [60,86400]; using default")
-
-    # `primary_branch` was a Config field in v0.3.7~0.3.25. Release detection
-    # moved into the GitHub Actions workflow in v0.3.19+ and landed as the
-    # sole mechanism in v0.3.25. As of v0.3.26 the client no longer needs
-    # the primary branch at all. Existing yoink.config.json files with a
-    # `primary_branch` key still load cleanly — the unknown-key warning
-    # above covers it if anyone typoed.
+    # `primary_branch` (v0.3.7~25), `heartbeat_cooldown_seconds` and
+    # `stale_threshold_seconds` (v0.3.x~27) are now legacy no-op keys —
+    # KNOWN_ROOT_KEYS keeps them in the silent-accept list so existing
+    # yoink.config.json files don't trip unknown-key warnings.
 
     return cfg, warnings
