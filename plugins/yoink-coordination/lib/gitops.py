@@ -1,10 +1,15 @@
-"""Git-side helpers for Phase 3.
+"""Git-side helpers for yoink-coordination.
 
 Includes:
-- `is_git_commit_command(cmd)`                   — §3.2.1 matcher
-- `committed_paths_in_head(cwd)`                 — `git show --name-only HEAD` parser (Task 4)
-- `working_tree_paths(cwd)`                      — `git status --porcelain` parser (Task 4)
-- `is_path_gitignored(cwd, path)`                — `git check-ignore` wrapper (Task 4)
+- `is_git_commit_command(cmd)`                   — detect `git commit` invocations
+- `is_git_revert_command(cmd)`                   — detect checkout/restore/reset/switch
+- `committed_paths_in_head(cwd)`                 — paths from `git show HEAD`
+- `working_tree_paths(cwd)`                      — paths from `git status --porcelain`
+- `is_path_gitignored(cwd, path)`                — `git check-ignore` wrapper
+- `branch_diff_paths(cwd, base_ref)`             — paths in HEAD..base_ref three-dot diff
+- `remote_branch_exists(cwd, branch)`            — `origin/<branch>` resolvable check
+- `git_repo_healthy(cwd)`                        — basic git reachability probe
+- `is_file_still_claimed(cwd, path, base_ref)`   — combined working-tree + branch-diff judgment
 
 All subprocess calls fail-open (return None / False / empty on error). Raising is
 never allowed from this module — callers in hooks rely on graceful degradation.
@@ -145,6 +150,36 @@ def is_git_commit_command(command: str) -> bool:
     return False
 
 
+# Subcommands that may revert working-tree changes.
+_REVERT_SUBCOMMANDS = {"checkout", "restore", "reset", "switch"}
+# Subcommands we intentionally ignore (ambiguous intent or new-commit semantics).
+_REVERT_EXCLUDE = {"stash", "revert"}
+
+
+def is_git_revert_command(command: str) -> bool:
+    """Return True iff `command` looks like it might revert working-tree
+    state: checkout, restore, reset --hard, branch switch, etc.
+
+    This is a *broad trigger* — false positives are safe because callers
+    always verify actual git state afterwards. False negatives (missed
+    revert) simply defer cleanup to SessionStart.
+    """
+    for segment in _quote_aware_segments(command or ""):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            continue
+        rest = _tokens_after_git(tokens)
+        if not rest:
+            continue
+        sub = rest[0]
+        if sub in _REVERT_SUBCOMMANDS:
+            return True
+        if sub in _REVERT_EXCLUDE:
+            continue
+    return False
+
+
 def _run_git(cwd: Path, args: List[str], timeout: int = 5) -> Optional[subprocess.CompletedProcess]:
     try:
         return subprocess.run(
@@ -213,3 +248,59 @@ def is_path_gitignored(cwd: Path, path: str) -> bool:
         return False
     # Exit codes: 0 = ignored, 1 = not ignored, 128 = error (treat as not ignored)
     return r.returncode == 0
+
+
+def branch_diff_paths(cwd: Path, base_ref: str) -> Optional[Set[str]]:
+    """Return paths that differ between HEAD and `base_ref` via three-dot
+    diff (changes this branch has added since its merge-base with base_ref).
+
+    Returns None on failure (base_ref unresolvable, non-repo, etc.) —
+    fail-open per module contract.
+    """
+    r = _run_git(cwd, ["diff", "--name-only", f"{base_ref}...HEAD"])
+    if r is None or r.returncode != 0:
+        return None
+    return {line for line in r.stdout.splitlines() if line.strip()}
+
+
+def remote_branch_exists(cwd: Path, branch: str) -> bool:
+    """Return True iff `origin/<branch>` is resolvable. Fail-open: False."""
+    r = _run_git(cwd, ["rev-parse", "--verify", f"origin/{branch}"])
+    if r is None:
+        return False
+    return r.returncode == 0
+
+
+def git_repo_healthy(cwd: Path) -> bool:
+    """Return True iff basic git operations succeed in cwd.
+
+    Used as a one-time precondition check before issuing multiple git
+    subprocess calls in a loop — if the repo is unreachable, callers
+    should skip the whole sweep rather than interpreting every
+    subprocess failure as 'answer is negative'.
+    """
+    r = _run_git(cwd, ["rev-parse", "--git-dir"])
+    if r is None:
+        return False
+    return r.returncode == 0
+
+
+def is_file_still_claimed(cwd: Path, path: str, base_ref: str) -> bool:
+    """Return True if `path` is still modified (working tree or branch diff).
+
+    Fail-open: returns True on any error (assume still claimed rather
+    than accidentally releasing a file that might still be in use).
+
+    Used by PostToolUse / SessionStart to decide whether a declared_file
+    entry should be kept or released after git revert-like operations.
+    """
+    wt = working_tree_paths(cwd)
+    if wt is None:
+        return True  # can't check → keep claim
+    if path in wt:
+        return True
+
+    bd = branch_diff_paths(cwd, base_ref)
+    if bd is None:
+        return True  # can't check → keep claim
+    return path in bd

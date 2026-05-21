@@ -48,6 +48,37 @@ def test_is_git_commit_command(cmd, expected):
     assert gitops.is_git_commit_command(cmd) is expected
 
 
+@pytest.mark.parametrize("cmd,expected", [
+    # Positives: file restore commands
+    ("git checkout -- file.txt", True),
+    ("git checkout -- src/foo.py src/bar.py", True),
+    ("git checkout file.txt", True),
+    ("git restore file.txt", True),
+    ("git restore --staged --worktree file.txt", True),
+    ("git reset --hard", True),
+    ("git reset --hard HEAD~1", True),
+    ("git -C /tmp/repo checkout -- file.txt", True),
+    ("cd src && git checkout -- file.txt", True),
+    ("git restore file.txt && git status", True),
+    # Broad trigger — accept branch switch (verification happens downstream)
+    ("git checkout main", True),
+    ("git switch main", True),
+    # Negatives
+    ("git stash", False),
+    ("git stash pop", False),
+    ("git revert abc123", False),
+    ("git commit -m wip", False),
+    ("git status", False),
+    ("git add file.txt", False),
+    ("git push", False),
+    ("ls", False),
+    ("", False),
+    ("echo 'git checkout' >> notes.txt", False),
+])
+def test_is_git_revert_command(cmd, expected):
+    assert gitops.is_git_revert_command(cmd) is expected
+
+
 import subprocess
 
 
@@ -58,6 +89,27 @@ def _git(cwd, *args):
 def _init_repo(path):
     path.mkdir(parents=True, exist_ok=True)
     _git(path, "init", "-q")
+    _git(path, "config", "user.email", "t@t")
+    _git(path, "config", "user.name", "t")
+    return path
+
+
+def _init_repo_main(path):
+    """Like _init_repo but forces the initial branch to `main`.
+
+    git < 2.28 defaults to `master` without init.defaultBranch; passing
+    --initial-branch keeps the new-test assertions portable without
+    touching the shared _init_repo helper.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(
+        ["git", "-C", str(path), "init", "-q", "--initial-branch=main"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        # Older git (<2.28): init without the flag, then force-rename.
+        _git(path, "init", "-q")
+        _git(path, "checkout", "-q", "-B", "main")
     _git(path, "config", "user.email", "t@t")
     _git(path, "config", "user.name", "t")
     return path
@@ -132,3 +184,89 @@ def test_working_tree_paths_includes_both_sides_of_rename(tmp_path):
 # — client-side release detection was fully replaced by the GitHub
 # Actions release workflow (content-diff against origin/<primary>). The
 # corresponding test cases were deleted with the code.
+
+
+def test_branch_diff_paths_shows_committed_changes(tmp_path):
+    repo = _init_repo_main(tmp_path / "r")
+    (repo / "a.txt").write_text("a")
+    _git(repo, "add", "a.txt"); _git(repo, "commit", "-qm", "init")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "b.txt").write_text("b")
+    _git(repo, "add", "b.txt"); _git(repo, "commit", "-qm", "add b")
+    paths = gitops.branch_diff_paths(repo, "main")
+    assert paths is not None
+    assert "b.txt" in paths
+    assert "a.txt" not in paths
+
+
+def test_branch_diff_paths_empty_when_same(tmp_path):
+    repo = _init_repo_main(tmp_path / "r")
+    (repo / "a.txt").write_text("a")
+    _git(repo, "add", "a.txt"); _git(repo, "commit", "-qm", "init")
+    paths = gitops.branch_diff_paths(repo, "main")
+    assert paths == set()
+
+
+def test_branch_diff_paths_non_repo_returns_none(tmp_path):
+    assert gitops.branch_diff_paths(tmp_path / "nope", "main") is None
+
+
+def test_remote_branch_exists_false_for_nonexistent(tmp_path):
+    repo = _init_repo(tmp_path / "r")
+    # No remote configured
+    assert gitops.remote_branch_exists(repo, "nonexistent") is False
+
+
+def test_remote_branch_exists_non_repo_returns_false(tmp_path):
+    assert gitops.remote_branch_exists(tmp_path / "nope", "main") is False
+
+
+def test_git_repo_healthy_true_in_repo(tmp_path):
+    repo = _init_repo_main(tmp_path / "r")
+    assert gitops.git_repo_healthy(repo) is True
+
+
+def test_git_repo_healthy_false_for_non_repo(tmp_path):
+    assert gitops.git_repo_healthy(tmp_path / "nope") is False
+
+
+def test_is_file_still_claimed_uncommitted_modification(tmp_path):
+    repo = _init_repo_main(tmp_path / "r")
+    (repo / "a.txt").write_text("a")
+    _git(repo, "add", "a.txt"); _git(repo, "commit", "-qm", "init")
+    (repo / "a.txt").write_text("modified")
+    assert gitops.is_file_still_claimed(repo, "a.txt", "main") is True
+
+
+def test_is_file_still_claimed_committed_on_branch(tmp_path):
+    repo = _init_repo_main(tmp_path / "r")
+    (repo / "a.txt").write_text("a")
+    _git(repo, "add", "a.txt"); _git(repo, "commit", "-qm", "init")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "b.txt").write_text("b")
+    _git(repo, "add", "b.txt"); _git(repo, "commit", "-qm", "add b")
+    assert gitops.is_file_still_claimed(repo, "b.txt", "main") is True
+
+
+def test_is_file_still_claimed_reverted_file(tmp_path):
+    repo = _init_repo_main(tmp_path / "r")
+    (repo / "a.txt").write_text("a")
+    _git(repo, "add", "a.txt"); _git(repo, "commit", "-qm", "init")
+    (repo / "a.txt").write_text("modified")
+    _git(repo, "checkout", "--", "a.txt")
+    assert gitops.is_file_still_claimed(repo, "a.txt", "main") is False
+
+
+def test_is_file_still_claimed_non_repo_returns_true(tmp_path):
+    # fail-open: can't determine → assume still claimed
+    assert gitops.is_file_still_claimed(tmp_path / "nope", "x.txt", "main") is True
+
+
+def test_is_file_still_claimed_clean_file_on_main_not_claimed(tmp_path):
+    """File exists in repo but hasn't been modified and we're on main
+    (no branch diff). Should NOT be claimed."""
+    repo = _init_repo_main(tmp_path / "r")
+    (repo / "a.txt").write_text("a")
+    _git(repo, "add", "a.txt"); _git(repo, "commit", "-qm", "init")
+    # Clean repo on main — nothing to claim
+    assert gitops.is_file_still_claimed(repo, "a.txt", "main") is False

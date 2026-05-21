@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 TASK_ISSUE_REGEX = re.compile(
     r"(?:^|[/_-])(?:issue|fix|feat|feature|bug|chore|hotfix)[/_-](\d+)(?:[/_-]|$)"
@@ -43,8 +44,31 @@ def _run(cmd: list) -> Optional[str]:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
 
+_SCP_LIKE_REMOTE_RE = re.compile(r"^[^@]+@([^:]+):")
+
+def _origin_host() -> Optional[str]:
+    """Host of the current repo's `origin` remote, or None if unparseable.
+
+    `gh api user` does not auto-detect the host from the current repo (only
+    repo-scoped subcommands like `gh issue` do). On multi-host setups (personal
+    github.com + corporate GHE) this returns the wrong login. Threading this
+    into `--hostname` keeps `detect_login` aligned with the host where the
+    `yoink:status` issue will actually be created."""
+    url = _run(["git", "remote", "get-url", "origin"])
+    if not url:
+        return None
+    if "://" in url:
+        host = urlparse(url).hostname
+        return host or None
+    m = _SCP_LIKE_REMOTE_RE.match(url)
+    return m.group(1) if m else None
+
 def detect_login() -> Optional[str]:
-    return _run(["gh", "api", "user", "--jq", ".login"])
+    args = ["gh", "api", "user", "--jq", ".login"]
+    host = _origin_host()
+    if host:
+        args.extend(["--hostname", host])
+    return _run(args)
 
 def detect_repo() -> Optional[str]:
     return _run(["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])
